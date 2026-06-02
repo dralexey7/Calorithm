@@ -4,9 +4,9 @@
 
 ## Подтверждённый стек
 
-Python · FastAPI · PostgreSQL · Telegram (aiogram) · LiteLLM (оркестрация LLM) · Docker
+Python · FastAPI · PostgreSQL · Telegram (aiogram) · LiteLLM · Redis · Alembic · Docker · Prometheus + Grafana
 
-> Остальное (источник данных КБЖУ, фоновая обработка, схема БД, структура проекта, тулинг) ещё проектируется. Агенты намеренно держатся **общими**: они знают продукт и ядро стека, но не зашивают решения, которые ещё не приняты. Конкретику добавим в файлы агентов после проектирования системы.
+> Архитектура спроектирована. Источник правды для агентов: `docs/architecture.md`, `docs/contracts.md`, `docs/conventions.md` (+ Definition of Done), `docs/adr/`, `docs/prd.md`, `docs/development-workflow.md`. Агенты ссылаются на эти документы, а не дублируют их — так контекст не расходится. Процесс — **TDD** (тесты раньше кода).
 
 ## Где лежат файлы
 
@@ -49,19 +49,22 @@ Claude Code сам решает, кого подключить, на основ�
 "Используй database-architect, чтобы добавить таблицу для целей по калориям"
 ```
 
-## Рекомендуемый порядок работы над фичей
+## Рекомендуемый порядок работы над фичей (TDD)
+
+Соответствует `docs/development-workflow.md` (Фазы 2…N). Ключевое: **тесты пишутся раньше кода**.
 
 ```
-1. product-manager       → user story + acceptance criteria
-2. tech-lead             → план задач и порядок выполнения
-3. system-architect      → как фича вписывается в архитектуру (если нужно)
-4. database-architect    → схема / миграция (если нужна БД)
-5. fastapi-developer     → бизнес-логика и API
-6. telegram-bot-developer→ бот-хендлеры
-7. test-engineer         → тесты
-8. security-auditor      → проверка безопасности
-9. code-reviewer         → финальный ревью
-10. devops-engineer      → если нужны изменения в инфре
+1. product-manager        → user story + acceptance criteria (если новые)
+2. tech-lead              → план стадии, разбивка на срезы
+3. system-architect       → если нужны изменения архитектуры/ADR
+4. database-architect     → схема + Alembic-миграция (если нужна БД)
+   ── далее TDD-цикл по каждому срезу ──
+5. test-engineer          → ТЕСТЫ первыми (красные), автор валидирует глазами
+6. fastapi-developer /    → реализация под зелёное
+   telegram-bot-developer
+7. code-reviewer          → ревью (+ security-auditor, если секреты/ввод/инфра)
+8. (правки по ревью, повтор по срезам)
+9. devops-engineer        → инфра/деплой/миграции при необходимости
 ```
 
 ## Агенты и модели
