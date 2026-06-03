@@ -18,16 +18,20 @@ Calorithm — умный счётчик калорий с минимальным
 
 - **Модульный монолит ядра** со строгой развязкой модулей по коду и по схемам БД («одна схема — один владелец-модуль»), межмодульное общение — событиями через брокер. Цель — механический вынос модулей в микросервисы позже (ADR-0001).
 - **Адаптеры каналов — отдельные контейнеры** с сетевой границей до ядра (ADR-0002).
-- **Очередь обработки + отложенный ответ**: входящее сообщение → очередь → воркер → результат доставляется обратно в канал-источник с задержкой (ADR-0003). Промежуточная индикация «обрабатываю…» — **опциональная** деталь адаптера (нативный chat action канала или без индикации), не требование ядра.
-- **Минимизация синхронных путей**: пользовательский запрос по возможности ставится в очередь, а не обрабатывается «в запросе». Сводка по запросу (US-007) — **асинхронная** (enqueue → `diary-worker` → доставка через `results.*`). Синхронны только резолв/настройки/primary и сам enqueue (ADR-0012).
+- **Единый `api-core` (FastAPI) делает всю синхронную работу и является единственным владельцем БД** (ADR-0015): резолв/настройки/primary, сводки (по запросу и авто — синхронно), мягкое удаление, **persist записей**. Внутри — модульная структура с владением схемами per-module (`users`, `diary`) для будущего выноса (ADR-0001).
+- **Асинхронность только там, где есть внешний/медленный/лимитируемый вызов** (LLM, OFF). Один stateless `processing-worker` — чистый вычислитель пайплайна обработки сообщения (intent → parsing → nutrition), **без доступа к БД** (ADR-0015). Очередь обработки + отложенный ответ (ADR-0003): входящее сообщение → `tasks.processing` → воркер → результат возвращается в `api-core`, тот персистит и доставляет в канал. Промежуточная индикация «обрабатываю…» — **опциональная** деталь адаптера.
+- **`api-core` оркеструет, воркер только считает; обратный хоп через брокер** (ADR-0015): воркер публикует результат в `results.processing`, `api-core` потребляет, персистит запись (единственный писатель БД) и публикует `Result` в `results.<channel>` для адаптера (ADR-0008).
 - **Брокер — Redis Streams за абстракцией `MessageBus`**; Kafka — отложенное решение с зафиксированными триггерами миграции (ADR-0004).
-- **`core-worker` — LLM-only**: 1 процесс, asyncio-конкурентность K=2–4; потолок темпа задаёт централизованный LLM-лимитер в Redis (ADR-0005).
-- **`scheduler` — отдельный деплой-юнит** (триггер периодических работ, без LLM) и **`diary-worker` — отдельный non-LLM обработчик** (генерация/доставка сводок) (ADR-0013).
+- **`processing-worker`** — 1 процесс, asyncio-конкурентность K=2–4; потолок темпа задаёт централизованный LLM-лимитер в Redis (ADR-0005). LLM/OFF — единственные точки с лимитерами.
+- **`scheduler` — отдельный деплой-юнит** (stateless-триггер 09:00, без LLM/БД); триггерит **синхронную** генерацию/доставку авто-сводки в `api-core` (ADR-0018). `diary-worker` удалён (ADR-0015).
+- **Always-write + статусная модель `entry` + мягкое удаление** (ADR-0016): запись сохраняется всегда; в сводках учитываются только `status='confirmed'`; удаление — мягкое.
+- **Отключаемая авто-сводка**: per-user флаг `auto_summary_enabled` (default включена) (ADR-0018).
+- **Сквозная трассируемость «сообщение → КБЖУ»**: корреляция по `task_id` + персист промежуточных артефактов (intent/parse/source/model_meta) (ADR-0017).
 - **LiteLLM — библиотека** в модуле `llm`, без отдельного gateway (ADR-0006).
 - **Масштабируемые лимитеры** (OFF и LLM) с общим состоянием в Redis (ADR-0005, ADR-0007).
 - **Изменения схемы БД — только через миграции (Alembic)**; ручные `ALTER` в проде запрещены (ADR-0014).
 - **Мониторинг Grafana + Prometheus с самого начала** (ADR-0010).
-- **Деплой** — docker-compose на одном VPS, Telegram long polling (ADR-0011).
+- **Деплой** — docker-compose на одном VPS, **8 деплой-юнитов**, Telegram long polling (ADR-0011, обновлён ADR-0015).
 
 ---
 
@@ -42,13 +46,17 @@ Calorithm — умный счётчик калорий с минимальным
 | [0005](adr/0005-worker-concurrency-llm-limiter.md) | Параллельность воркера + централизованный LLM-лимитер | 1 воркер, K=2–4; потолок темпа — token-bucket по RPM/TPM единого токена в Redis. |
 | [0006](adr/0006-litellm-as-library.md) | LiteLLM как библиотека | Без отдельного gateway-процесса; всё в модуле `llm`. |
 | [0007](adr/0007-scalable-off-limiter.md) | Масштабируемый лимитер OFF | Общее состояние в Redis; graceful degradation на LLM при исчерпании бюджета. |
-| [0008](adr/0008-result-delivery-via-topic.md) | Доставка результата через топик | Топик результатов по каналу; адаптер только подписан на `results.*`; вход — через `core-api`, не прямым publish. |
-| [0009](adr/0009-primary-channel-auto-summary.md) | Primary-канал для авто-сводки | Мульти-канал активен; авто-сводка 9:00 — только в primary; триггерит `scheduler`, строит `diary-worker`. |
+| [0008](adr/0008-result-delivery-via-topic.md) | Доставка результата через топик (дополнен 0015) | Топик `results.<channel>` по каналу; адаптер только подписан на `results.*`. Единственный публикатор `results.<channel>` — `api-core`; воркер возвращает результат в `api-core` через `results.processing`. |
+| [0009](adr/0009-primary-channel-auto-summary.md) | Primary-канал для авто-сводки (дополнен 0018) | Мульти-канал активен; авто-сводка 9:00 — только в primary; триггерит `scheduler`, строит синхронно `api-core`. |
 | [0010](adr/0010-monitoring-grafana-prometheus.md) | Мониторинг Grafana + Prometheus | Закладывается с самого начала; метрики LLM/очереди/лимитеров/качества/доставки. |
-| [0011](adr/0011-deploy-compose-single-vps.md) | Деплой docker-compose / один VPS | 9 деплой-юнитов; Telegram long polling; один деплой-таргет. |
-| [0012](adr/0012-minimize-sync-async-summary.md) | Минимизация синхронного + async-сводка | Запрос ставится в очередь; сводка US-007 асинхронна; канонический вход через `core-api`. |
-| [0013](adr/0013-scheduler-and-nonllm-worker.md) | Scheduler отдельно + non-LLM воркер | `core-worker` LLM-only; `scheduler` — отдельный юнит-триггер; `diary-worker` строит сводки. |
+| [0011](adr/0011-deploy-compose-single-vps.md) | Деплой docker-compose / один VPS (обновлён 0015) | 8 деплой-юнитов; Telegram long polling; один деплой-таргет. |
+| [0012](adr/0012-minimize-sync-async-summary.md) | Минимизация синхронного (изменён 0015) | Async только для LLM/OFF-пайплайна; сводка US-007 — **снова синхронна**; канонический вход через `api-core`. |
+| [0013](adr/0013-scheduler-and-nonllm-worker.md) | ~~Scheduler отдельно + non-LLM воркер~~ (**заменён 0015**) | Исторический: вводил `diary-worker`/`tasks.diary`. Отменён: один `processing-worker`, сводка синхронна. |
 | [0014](adr/0014-schema-changes-via-migrations-alembic.md) | Миграции схемы только через Alembic | Ручные `ALTER` в проде запрещены; ревизии обратимы; в стеке Alembic. |
+| [0015](adr/0015-single-api-core-sole-db-owner-single-worker.md) | Единый `api-core` (владелец БД) + один воркер | `api-core` делает всю синхронную работу и единственный пишет в БД; `processing-worker` — stateless LLM/OFF-пайплайн без БД; возврат через `results.processing`. Supersedes 0013; amends 0012/0009. |
+| [0016](adr/0016-entry-status-always-write-soft-delete.md) | Always-write + статус `entry` + soft-delete | Запись всегда сохраняется; статусы `pending/confirmed/rejected/deleted`; в сводках — только `confirmed`; удаление мягкое. |
+| [0017](adr/0017-end-to-end-traceability.md) | Сквозная трассируемость сообщение→КБЖУ | Корреляция по `task_id`; персист артефактов (intent/parse/source/model_meta) для разбора ошибок. |
+| [0018](adr/0018-auto-summary-toggle-scheduler-sync-trigger.md) | Отключаемая авто-сводка + scheduler-триггер | Per-user `auto_summary_enabled` (default on); `scheduler` дёргает синхронную сводку в `api-core`. Amends 0009. |
 
 ---
 
@@ -58,32 +66,33 @@ Calorithm — умный счётчик калорий с минимальным
 
 ### 3.1. Контейнеры-сервисы
 
+> Имя сервиса ядра — **`api-core`** (FastAPI). В путях эндпоинтов и именах топиков может встречаться исторический префикс `core-api`/`core_api` — это тот же компонент (свобода реализации в именовании каталога; роль и контракт — `api-core`).
+
 | Контейнер | Роль | Знает про Telegram? |
 |---|---|---|
-| **channel-telegram** (адаптер) | aiogram: приём update, опциональная индикация (нативный chat action или без неё — ADR-0003), вызов `core-api` по HTTP (вход — только через `POST /v1/messages`, прямого publish в брокер нет — ADR-0012), подписка **только** на топик результатов своего канала (`results.*`), форматирование и отправка ответа. Тонкий, знает только свой транспорт. | Да (единственный) |
-| **core-api** | Канало-независимый HTTP-фасад ядра (FastAPI): приём `(channel, channel_user_id, payload)`. Синхронны только: резолв/регистрация пользователя (US-001), чтение/смена настроек (US-005), смена primary-канала. Остальные запросы — enqueue: лог еды (US-002), сводка по запросу (US-007 — теперь async), удаление (US-009) ставятся в очередь, результат — через `results.*` (ADR-0012). | Нет |
-| **core-worker** | **LLM-only** потребитель очереди LLM-задач (`tasks.llm`): пайплайн intent → parsing → nutrition → save, LLM-вызовы через лимитер, публикация результата в топик доставки. Конкурентность K (ADR-0005). Периодических работ и non-LLM сводок не содержит (ADR-0013). | Нет |
-| **scheduler** | Отдельный лёгкий процесс-триггер периодических работ: тикает по времени, находит пользователей с локальным 09:00 без отправленной авто-сводки и ставит задачу `build_summary` в `tasks.diary`. Сам сводку не строит и LLM не вызывает (ADR-0009, ADR-0013). | Нет |
-| **diary-worker** | non-LLM потребитель `tasks.diary`: строит сводку через `diary.summary` (для US-007 по запросу и US-008 авто) и публикует `Result{kind="daily_summary"}` в `results.*`. Опционально — async-удаление (US-009). Без LLM-вызовов (ADR-0013). | Нет |
-| **broker** (Redis) | Очереди задач (`tasks.llm`, `tasks.diary`) + шина межмодульных событий + топик результатов + хранилище лимитеров (OFF и LLM). | Нет |
+| **channel-telegram** (адаптер) | aiogram: приём update, опциональная индикация (нативный chat action или без неё — ADR-0003), вызов `api-core` по HTTP (вход — только через `POST /v1/messages` и др. эндпоинты, прямого publish в брокер нет — ADR-0012), подписка **только** на топик результатов своего канала (`results.<channel>`), форматирование и отправка ответа. Тонкий, знает только свой транспорт. | Да (единственный) |
+| **api-core** | Канало-независимый HTTP-фасад ядра (FastAPI) **и единственный владелец БД** (ADR-0015). Делает **всю синхронную работу**: резолв/регистрация (US-001), чтение/смена настроек вкл. `auto_summary_enabled` (US-005, ADR-0018), смена primary, **сводка по запросу и авто-сводка синхронно** (US-007/US-008, чтение БД + формат), мягкое удаление (US-009, ADR-0016), **persist записей еды**. Для еды (US-002): ставит `ProcessingTask` в `tasks.processing`, затем потребляет `results.processing`, персистит запись и публикует `Result` в `results.<channel>`. Внутри — модули-владельцы схем (`users`, `diary`). | Нет |
+| **processing-worker** | **Stateless async-вычислитель** пайплайна обработки сообщения (`tasks.processing`): intent → parsing → nutrition (OFF через OFF-лимитер, fallback LLM через LLM-лимитер), сбор артефактов трассировки (ADR-0017). **БД не касается** (ADR-0015). Возвращает `ProcessingResult` (позиции + КБЖУ + источники + артефакты) в `results.processing`. Конкурентность K (ADR-0005). | Нет |
+| **scheduler** | Отдельный лёгкий stateless-триггер 09:00: тикает по времени, для пользователей с локальным 09:00 **дёргает внутренний механизм `api-core`** (авто-сводка). Сводку не строит, в БД/LLM не ходит (ADR-0009, ADR-0018). | Нет |
+| **broker** (Redis) | Очередь задач `tasks.processing` + обратный топик `results.processing` (воркер → `api-core`) + шина межмодульных событий + топики `results.<channel>` (доставка в адаптеры) + хранилище лимитеров (OFF и LLM). | Нет |
 | **postgres** | Персистентность. Логически разделён по схемам-владельцам (ADR-0001). | Нет |
 | **prometheus** | Сбор метрик со всех сервисов (pull со `/metrics`). | Нет |
 | **grafana** | Дашборды/алерты поверх Prometheus. | Нет |
 
 ### 3.2. Внутренние модули ядра
 
-Живут в `core-api` / `core-worker`, каждый — владелец своей схемы, общаются событиями через брокер.
+Все модули с БД (`users`, `diary`) живут в `api-core` (единственный владелец БД, ADR-0015); stateless-модули пайплайна (`intent`, `parsing`, `nutrition`, `off_client`, `llm`) живут в `processing-worker`. Каждый модуль с БД — владелец своей схемы, общаются событиями через брокер.
 
 | Модуль | Ответственность | Схема-владелец |
 |---|---|---|
-| **users** | Резолв/создание канало-независимого пользователя; per-user настройки (timezone, confirm, dev-флаг); реестр каналов пользователя с `is_active`/`is_primary`. US-001, US-005, A1, A10. | `users` |
-| **intent** | Классификация «про еду / не про еду» (US-017) через `llm`. | — (stateless) |
-| **parsing** | Текст → позиции (состав, количество, оценочный вес). US-002, US-003. | — (stateless) |
-| **nutrition** | КБЖУ per-item: OFF → fallback LLM; источник на уровне продукта. US-004, A9. | — (stateless; кеш опционально — свобода реализации) |
-| **off_client** | HTTP-клиент OFF + масштабируемый глобальный лимитер (US-010). Единственная точка обращения к OFF. | лимитер в Redis |
-| **llm** | Единственная точка LLM-вызовов через LiteLLM: ключи, модель, таймауты, ретраи, учёт стоимости/латентности, версионирование промптов, проход через централизованный LLM-лимитер (ADR-0005). | лимитер в Redis |
-| **diary** | Сохранение записей с изоляцией по пользователю, хранение исходного текста сообщения, удаление по id, построение сводок, **учёт доставки авто-сводки** (`summary_dispatch`). US-002, US-006, US-007, US-008, US-009. Логика сводки и запись `summary_dispatch` исполняются в `diary-worker` (для US-007 и US-008). | `diary` (вкл. `summary_dispatch`) |
-| **scheduler** | **Только триггер** периодических работ: в 9:00 по TZ пользователя (из `users`) ставит задачу `build_summary` в очередь (US-008, ADR-0009, ADR-0013). Сводку не строит, LLM не вызывает, в БД не пишет; дедуп — на стороне `diary-worker`. Деплоится отдельным юнитом. | — (stateless) |
+| **users** | Резолв/создание канало-независимого пользователя; per-user настройки (timezone, confirm, dev-флаг, `auto_summary_enabled` — ADR-0018); реестр каналов пользователя с `is_active`/`is_primary`. US-001, US-005, A1, A10. | `users` |
+| **intent** | Классификация «про еду / не про еду» (US-017) через `llm`. Живёт в `processing-worker`. | — (stateless) |
+| **parsing** | Текст → позиции (состав, количество, оценочный вес). US-002, US-003. Живёт в `processing-worker`. | — (stateless) |
+| **nutrition** | КБЖУ per-item: OFF → fallback LLM; источник на уровне продукта. US-004, A9. Живёт в `processing-worker`. | — (stateless; кеш опционально — свобода реализации) |
+| **off_client** | HTTP-клиент OFF + масштабируемый глобальный лимитер (US-010). Единственная точка обращения к OFF. Живёт в `processing-worker`. | лимитер в Redis |
+| **llm** | Единственная точка LLM-вызовов через LiteLLM: ключи, модель, таймауты, ретраи, учёт стоимости/латентности, версионирование промптов (`model_meta` для трассы — ADR-0017), проход через централизованный LLM-лимитер (ADR-0005). Живёт в `processing-worker`. | лимитер в Redis |
+| **diary** | **В `api-core`.** Сохранение записей с изоляцией по пользователю (always-write + статус `entry`, ADR-0016), хранение `raw_text` и артефактов трассировки (ADR-0017), мягкое удаление по id (US-009), **синхронное построение сводок** (US-007/US-008, фильтр `status='confirmed'`), **учёт доставки авто-сводки** (`summary_dispatch`). US-002, US-006, US-007, US-008, US-009. Единственный писатель `entries`/`entry_items`/`summary_dispatch`. | `diary` (вкл. `summary_dispatch`) |
+| **scheduler** | **Только триггер**: в 9:00 по TZ пользователя дёргает внутренний механизм `api-core` для авто-сводки (US-008, ADR-0009, ADR-0018). Сводку не строит, LLM не вызывает, в БД не пишет; дедуп — на стороне `api-core` (`summary_dispatch`). Деплоится отдельным юнитом. | — (stateless) |
 | **bus** | Порт `MessageBus` + адаптер брокера (ADR-0004). Все межмодульные события — через него. | — |
 | **config** | Конфигурация/секреты (Pydantic Settings из ENV). | — |
 
@@ -100,37 +109,33 @@ flowchart TB
   U[Пользователь]
 
   subgraph ADP["Контейнер channel-telegram (адаптер)"]
-    TGIN[aiogram in: update → HTTP в core-api]
-    TGOUT[aiogram out: подписка на results.* → ответ]
+    TGIN[aiogram in: update → HTTP в api-core]
+    TGOUT[aiogram out: подписка на results.telegram → ответ]
   end
 
-  subgraph API["Контейнер core-api (FastAPI)"]
-    HTTP[HTTP-фасад: резолв/настройки/primary синхронно; messages/summary/delete → enqueue]
+  subgraph API["Контейнер api-core (FastAPI) — единственный владелец БД"]
+    HTTP[HTTP-фасад: резолв/настройки/primary/сводка/удаление — синхронно; еда → enqueue]
+    CONS[consumer results.processing → persist + publish results.channel]
     USR1[users]
-    DIA1[diary read]
+    DIA1["diary (persist + summary, единственный писатель БД)"]
   end
 
-  subgraph WRK["Контейнер core-worker (LLM-only, конкурентность K)"]
-    PIPE[пайплайн intent→parsing→nutrition→save]
+  subgraph WRK["Контейнер processing-worker (stateless, БЕЗ БД, конкурентность K)"]
+    PIPE[пайплайн intent→parsing→nutrition]
     INT[intent]
     PAR[parsing]
     NUT[nutrition]
     LLM["llm (LiteLLM + LLM-лимитер)"]
     OFF["off_client (+OFF-лимитер)"]
-    DIA2[diary.save]
   end
 
-  subgraph DWRK["Контейнер diary-worker (non-LLM)"]
-    SUM[diary.summary build]
-  end
-
-  subgraph SCHC["Контейнер scheduler (триггер)"]
-    SCH[тик 9:00 → enqueue build_summary]
+  subgraph SCHC["Контейнер scheduler (триггер 9:00)"]
+    SCH[тик 9:00 → дёрнуть авто-сводку api-core]
   end
 
   subgraph BRK["Контейнер broker (Redis)"]
-    QL[(очередь tasks.llm)]
-    QD[(очередь tasks.diary)]
+    QP[(очередь tasks.processing)]
+    RP[(обратный топик results.processing)]
     EV[(шина событий модулей)]
     RES[(топик результатов results.telegram)]
     LIM[(лимитеры OFF и LLM)]
@@ -143,32 +148,28 @@ flowchart TB
   EXT_OFF[[OpenFoodFacts]]
 
   U <-->|Bot API| ADP
-  TGIN -->|HTTP POST /v1/messages, GET /v1/summary, ...| HTTP
+  TGIN -->|HTTP POST /v1/messages, GET /v1/summary, DELETE ...| HTTP
   RES -->|deliver результат| TGOUT
   TGOUT --> U
 
-  HTTP -->|enqueue LLM-задачи| QL
-  HTTP -->|enqueue build_summary| QD
+  HTTP -->|enqueue ProcessingTask| QP
   HTTP --> USR1
   HTTP --> DIA1
   USR1 --> DB
   DIA1 --> DB
 
-  QL -->|consume| PIPE
+  QP -->|consume| PIPE
   PIPE --> INT --> LLM
   PIPE --> PAR --> LLM
   PIPE --> NUT
   NUT --> OFF
   NUT --> LLM
-  PIPE --> DIA2 --> DB
-  PIPE -->|publish результат| RES
+  PIPE -->|publish ProcessingResult| RP
+  RP -->|consume| CONS
+  CONS --> DIA1
+  CONS -->|publish Result| RES
 
-  QD -->|consume| SUM
-  SUM --> DB
-  SUM -->|publish результат| RES
-
-  SCH -->|enqueue build_summary| QD
-  SCH -->|read timezone via users-модуль| DB
+  SCH -->|HTTP внутр.: POST /v1/internal/auto-summary| HTTP
   LLM --> LIM
   OFF --> LIM
   LLM --> EXT_LLM
@@ -176,7 +177,6 @@ flowchart TB
 
   API -. /metrics .-> PROM
   WRK -. /metrics .-> PROM
-  DWRK -. /metrics .-> PROM
   SCHC -. /metrics .-> PROM
   ADP -. /metrics .-> PROM
   BRK -. exporter .-> PROM
@@ -185,19 +185,20 @@ flowchart TB
 
 ### 4.2. Поток обработки сообщения про еду (через очередь, с доставкой результата)
 
-US-002 / US-017 / US-004 / US-005. Приём и ответ развязаны очередью; результат приходит асинхронно через топик результатов; at-least-once + идемпотентность по `task_id`.
+US-002 / US-017 / US-004 / US-005 (always-write — ADR-0016). Приём и обработка развязаны очередью; воркер считает без БД и возвращает результат в `api-core`, тот персистит (always-write) и доставляет в канал. at-least-once + идемпотентность по `task_id` (`entries.source_task_id`).
 
 ```mermaid
 sequenceDiagram
   participant U as Пользователь (TG)
   participant ADP as channel-telegram
-  participant API as core-api
-  participant Q as broker: очередь tasks.llm
-  participant W as core-worker (LLM-only)
+  participant API as api-core (HTTP + DB owner)
+  participant Q as broker: tasks.processing
+  participant W as processing-worker (stateless, без БД)
   participant LIML as LLM-лимитер (Redis)
   participant OFF as off_client(+OFF-лимитер)
   participant LLM as llm
-  participant DIA as diary
+  participant RP as broker: results.processing
+  participant DB as PostgreSQL (схема diary)
   participant RES as broker: results.telegram
   participant OUT as channel-telegram (подписчик)
 
@@ -207,17 +208,14 @@ sequenceDiagram
   end
   ADP->>API: POST /v1/messages {channel, channel_user_id, text, reply_to}
   API->>API: резолв user_id (синхронно)
-  API->>Q: publish Task{task_id, channel, channel_user_id, user_id, text, reply_to}
+  API->>Q: publish ProcessingTask{task_id, user_id, channel, channel_user_id, text, reply_to, confirm_enabled}
   API-->>ADP: {task_id, status=queued}
   Note over ADP: адаптер свободен, не блокируется
 
   Q->>W: consume (consumer group, at-least-once)
-  W->>LLM: classify intent
-  LLM->>LIML: acquire (RPM/TPM)
-  LIML-->>LLM: ok
+  W->>LLM: classify intent (acquire LLM-лимитер RPM/TPM)
   alt не про еду (US-017)
-    LLM-->>W: not_food
-    W->>RES: publish Result{task_id, channel, reply_to, kind=not_food}
+    W->>RP: publish ProcessingResult{task_id, intent=not_food}
   else про еду
     W->>LLM: parse → позиции (через лимитер)
     loop по каждому продукту
@@ -229,101 +227,105 @@ sequenceDiagram
         LLM-->>W: КБЖУ/100г, source=LLM
       end
     end
-    alt подтверждение включено (US-005)
-      W->>RES: publish Result{kind=preview, items}
-      Note over OUT,U: предпросмотр + кнопки; confirm идёт новой задачей через core-api → очередь
-    else подтверждение выключено
-      W->>DIA: save_entry(user, items) в текущий день TZ
-      W->>RES: publish Result{kind=logged, breakdown+итог}
-    end
+    W->>RP: publish ProcessingResult{task_id, items, totals, artifacts (intent/parse/source/model_meta)}
   end
 
+  RP->>API: consume ProcessingResult (api-core — потребитель)
+  alt не про еду
+    Note over API: записи нет; готовим Result{kind=not_food}
+  else про еду (always-write — ADR-0016)
+    API->>DB: persist entry+items+артефакты; status = confirmed (confirm off) / pending (confirm on)
+    alt confirm включён (US-005)
+      Note over API: status=pending; Result{kind=preview} → подтверждение придёт новой задачей
+    else confirm выключен
+      Note over API: status=confirmed; Result{kind=logged, breakdown+итог}
+    end
+  end
+  API->>RES: publish Result{task_id, channel, reply_to, kind, payload}
   RES->>OUT: deliver по channel+reply_to
-  OUT->>U: финальный ответ (разбивка/итог либо «не еда»)
+  OUT->>U: финальный ответ (разбивка/итог · превью · «не еда»)
 ```
 
 ### 4.3. Поток авто-сводки в 9:00 (фоновый, без ожидающего пользователя)
 
-US-008 / A6 / ADR-0009 / ADR-0013. `scheduler` (отдельный юнит, stateless) только триггерит: по `users.timezone` находит пользователей с локальным 09:00 и ставит задачу `build_summary` в очередь (без чтения статуса доставки). Строит, дедуплицирует и доставляет сводку non-LLM обработчик `diary-worker` (тот же код, что и для US-007). Сводка считается за прошедший день в TZ пользователя; если записей не было — не отправляется; доставка только в primary-канал. Повторный/перекрывающийся тик безопасен: дубль режет `summary_dispatch (UNIQUE)` на стороне `diary-worker`.
+US-008 / A6 / ADR-0009 / ADR-0018. `scheduler` (отдельный юнит, stateless) только триггерит: по `users.timezone` находит пользователей с локальным 09:00 и **дёргает внутренний механизм `api-core`** (HTTP внутри compose-сети). Всю логику — проверку `auto_summary_enabled`, чтение записей (только `status='confirmed'`), формат, дедуп через `summary_dispatch`, публикацию в primary-канал — исполняет синхронно `api-core`. Сводка за прошедший день в TZ пользователя; если записей нет или флаг выключен — не отправляется. Повторный/перекрывающийся тик безопасен: дубль режет `summary_dispatch (UNIQUE)` в `api-core`.
 
 ```mermaid
 sequenceDiagram
   participant SCH as scheduler (отдельный юнит, stateless)
+  participant API as api-core (синхронно, DB owner)
   participant USR as users
-  participant QD as broker: tasks.diary
-  participant DW as diary-worker (non-LLM)
-  participant DIA as diary
-  participant DSP as diary.summary_dispatch (БД)
+  participant DIA as diary (+summary_dispatch)
+  participant DB as PostgreSQL
   participant RES as broker: results.telegram
   participant OUT as channel-telegram
 
   Note over SCH: тикает периодически (свобода реализации: cron/loop)
-  SCH->>USR: пользователи, у кого локальное время = 09:00 (только по timezone, без чтения dispatch)
-  loop по каждому такому пользователю
-    SCH->>QD: enqueue Task{kind=build_summary, user_id, local_date=вчера, origin=auto}
-  end
-
-  QD->>DW: consume build_summary (at-least-once; дедуп по summary_dispatch UNIQUE + task_id)
-  DW->>DIA: summary(user, local_date=вчера)
-  alt записей за вчера нет (A6)
-    Note over DW: не отправляем, фиксируем «пусто» в dispatch
-    DW->>DSP: upsert(user, local_date) [skipped]
-  else есть записи
-    DW->>USR: primary-канал пользователя (is_primary)
-    DW->>DSP: claim(user, local_date)  %% UNIQUE защищает от дубля
-    DW->>RES: publish Result{kind=daily_summary, channel=primary, reply_to=chat_id, payload}
-    RES->>OUT: deliver
-    OUT->>OUT: отправка в primary-канал
-    DW->>DSP: mark sent_at
+  SCH->>API: POST /v1/internal/auto-summary (пользователи с локальным 09:00 или один тик-on-all)
+  loop по каждому пользователю с локальным 09:00
+    API->>USR: auto_summary_enabled? primary-канал?
+    alt флаг выключен (ADR-0018)
+      Note over API: пропускаем пользователя
+    else флаг включён
+      API->>DIA: summary(user, local_date=вчера; фильтр status=confirmed)
+      DIA->>DB: read confirmed entries
+      alt записей за вчера нет (A6)
+        Note over API: не отправляем, фиксируем «пусто»
+        API->>DB: upsert summary_dispatch(user, local_date) [skipped]
+      else есть записи
+        API->>DB: claim summary_dispatch(user, local_date)  %% UNIQUE защищает от дубля
+        API->>RES: publish Result{kind=daily_summary, channel=primary, reply_to, payload}
+        RES->>OUT: deliver в primary-канал
+        API->>DB: mark sent_at
+      end
+    end
   end
 ```
 
-> Примечание: для авто-сводки `summary_dispatch (UNIQUE user_id, local_date)` остаётся первичной защитой от дубля (рестарт/повтор `build_summary` не шлёт второй раз). Для сводки по запросу US-007 идемпотентность — по `task_id` (повтор доставки не шлёт дважды), `summary_dispatch` не используется.
+> Примечание: `summary_dispatch (UNIQUE user_id, local_date)` остаётся первичной защитой от дубля авто-сводки (рестарт/повторный тик не шлёт второй раз). Пишет таблицу только `api-core` (владелец схемы `diary`); `scheduler` к ней не обращается. Для сводки по запросу (US-007) `summary_dispatch` не используется — она синхронна и идемпотентна по природе (чтение + ответ в HTTP).
 
-### 4.4. Поток сводки по запросу (US-007, теперь асинхронный — ADR-0012)
+### 4.4. Поток сводки по запросу (US-007, синхронный — ADR-0015)
 
 ```mermaid
 sequenceDiagram
   participant U as Пользователь (TG)
   participant ADP as channel-telegram
-  participant API as core-api
-  participant QD as broker: tasks.diary
-  participant DW as diary-worker (non-LLM)
+  participant API as api-core (синхронно, DB owner)
   participant DIA as diary
-  participant RES as broker: results.telegram
-  participant OUT as channel-telegram
+  participant DB as PostgreSQL
 
   U->>ADP: команда «сводка за сегодня»
   ADP->>API: GET /v1/summary {channel, channel_user_id, local_date?}
   API->>API: резолв user_id (синхронно)
-  API->>QD: enqueue Task{kind=build_summary, user_id, local_date, origin=request, reply_to}
-  API-->>ADP: {task_id, status=queued}
-  QD->>DW: consume build_summary
-  DW->>DIA: summary(user, local_date)
-  DW->>RES: publish Result{kind=daily_summary, channel, reply_to, payload (или is_empty)}
-  RES->>OUT: deliver
-  OUT->>U: список позиций + итог (или «записей нет»)
+  API->>DIA: summary(user, local_date; фильтр status=confirmed)
+  DIA->>DB: read confirmed entries
+  DB-->>DIA: позиции + итоги
+  API-->>ADP: SummaryResponse{local_date, items, totals, is_empty}
+  ADP->>U: список позиций + итог (или «записей нет»)
 ```
+
+> Сводка по запросу — чтение БД + формат, без LLM/OFF и без очереди: возвращается прямо в HTTP-ответе (ADR-0015). Доставки через `results.<channel>` для неё не нужно.
 
 ---
 
 ## 5. Async-границы (явно)
 
-Принцип (ADR-0012): **минимум синхронного**. Пользовательский запрос по возможности ставится в очередь, а не обрабатывается «в запросе»; единый путь доставки результата — топик `results.<channel>`.
+Принцип (ADR-0015, уточняет ADR-0012): **async только там, где есть внешний/медленный/лимитируемый вызов** (LLM, OFF). Всё остальное (резолв, настройки, primary, сводки, удаление, persist) — **синхронно** в `api-core`. Асинхронен ровно один путь: обработка сообщения о еде (пайплайн в `processing-worker`).
 
 - **Граница адаптер ↔ ядро** — сетевая (ADR-0002), **асимметрична** (ADR-0008/0012):
-  - вход — **всегда HTTP** к `core-api` (`POST /v1/messages`, `GET /v1/summary`, `DELETE /v1/entries/{id}`, `POST /v1/users/resolve`, `PATCH /v1/users/settings`, `POST /v1/users/primary-channel`); прямого publish `Task` в брокер адаптер **не делает**;
-  - выход — **только подписка** на брокер (топик `results.telegram`); адаптер не знает топиков задач.
-- **Что синхронно (минимальный обязательный набор):** резолв/регистрация пользователя (US-001), чтение/смена настроек (US-005), смена primary-канала, и сам **enqueue** (быстрый non-blocking возврат `task_id`/`status=queued`). Обоснование: резолв — предусловие enqueue; настройки/primary — мгновенные операции над одной строкой без отложенного результата; enqueue — лишь постановка в очередь, не обработка.
-- **Что асинхронно (через очередь + `results.*`):** лог еды (US-002, очередь `tasks.llm`), сводка по запросу (US-007, очередь `tasks.diary` — теперь async, ADR-0012), удаление (US-009, опционально async), авто-сводка (US-008, триггер `scheduler` → `tasks.diary`).
-- **Топология обработки задач (ADR-0013):**
-  - `tasks.llm` ← `ingest_message`, `confirm` → потребитель **`core-worker`** (LLM-only) → доставка `results.*`;
-  - `tasks.diary` ← `build_summary` (по запросу и авто), опц. `delete_entry` → потребитель **`diary-worker`** (non-LLM) → доставка `results.*`;
-  - тик 09:00 (US-008) → **`scheduler`** только ставит `build_summary` в `tasks.diary` (сам не строит).
-- **Граница приём ↔ обработка** — асинхронная через очередь (ADR-0003): задачи никогда не блокируют адаптер.
+  - вход — **всегда HTTP** к `api-core` (`POST /v1/messages`, `GET /v1/summary`, `DELETE /v1/entries/{id}`, `POST /v1/users/resolve`, `PATCH /v1/users/settings`, `POST /v1/users/primary-channel`); прямого publish `Task` в брокер адаптер **не делает**;
+  - выход — **только подписка** на брокер (топик `results.<channel>`, в MVP `results.telegram`); адаптер не знает топиков задач.
+- **Что синхронно (в HTTP-ответе `api-core`):** резолв/регистрация (US-001), чтение/смена настроек вкл. `auto_summary_enabled` (US-005), смена primary, **сводка по запросу (US-007)**, **мягкое удаление (US-009)**, и **enqueue еды** (быстрый non-blocking возврат `task_id`/`status=queued`). Авто-сводка (US-008) — синхронно в `api-core` по триггеру `scheduler`.
+- **Что асинхронно (единственный путь — через очередь):** обработка сообщения о еде (US-002/US-017/US-004) — `ProcessingTask` в `tasks.processing` → `processing-worker` (LLM/OFF под лимитерами) → `ProcessingResult` в `results.processing` → `api-core` персистит и публикует `Result` в `results.<channel>`.
+- **Топология задач (ADR-0015):**
+  - `tasks.processing` ← `ProcessingTask` (ingest, и confirm как новая задача — свобода реализации) → потребитель **`processing-worker`** (stateless, без БД) → возврат в `results.processing`;
+  - `results.processing` ← `ProcessingResult` → потребитель **`api-core`** → persist → `results.<channel>`;
+  - тик 09:00 (US-008) → **`scheduler`** дёргает внутренний синхронный механизм `api-core` (ADR-0018); очереди для сводок нет.
+- **Граница приём ↔ обработка еды** — асинхронная через очередь (ADR-0003): задачи никогда не блокируют адаптер.
+- **Граница `api-core` ↔ `processing-worker`** — брокер (`tasks.processing` туда, `results.processing` обратно); воркер БД не касается, `api-core` — единственный писатель БД (ADR-0015).
 - **Граница ядро ↔ ядро (модули)** — события через брокер (ADR-0001), не общие таблицы.
 
-> Свобода реализации: confirm-flow (US-005) может реализовать подтверждение как новую задачу в очередь (callback → `core-api` → `tasks.llm`) либо как короткоживущее состояние превью. Контракт результата `kind=preview` фиксирован; внутренняя механика — на этапе реализации.
+> Свобода реализации: confirm-flow (US-005) — подтверждение может быть новой задачей `ProcessingTask` (callback → `api-core` → `tasks.processing`) либо переходом статуса уже сохранённой `pending`-записи в `confirmed` без повторного прогона пайплайна (ADR-0016). Контракт результата `kind=preview` фиксирован; механика — на этапе реализации.
 
 ---
 
@@ -338,6 +340,7 @@ sequenceDiagram
   - `created_at` (timestamptz)
   - `timezone` (text, по умолчанию `Europe/Moscow`) — A1
   - `confirm_enabled` (bool, по умолчанию `false`) — US-005, A7
+  - `auto_summary_enabled` (bool, по умолчанию `true`) — отключаемая авто-сводка (US-008, ADR-0018)
   - `is_dev` (bool, по умолчанию `false`) — US-009, A10
   - инвариант: настройки per-user; смена TZ вне MVP (US-013), но поле есть.
 - **`channel_identities`**
@@ -359,7 +362,11 @@ sequenceDiagram
   - `user_id` (uuid) — изоляция по пользователю (US-006)
   - `created_at_utc` (timestamptz)
   - `local_date` (date) — «день» в TZ пользователя (US-002, US-007)
-  - `raw_text` (text) — **исходный текст пользовательского сообщения**, из которого создана запись (трассируемость, отладка качества парсинга R4, повторный разбор). Связан с записью 1:1.
+  - `status` (enum `pending | confirmed | rejected | deleted`) — статусная модель always-write (ADR-0016); **в сводках учитываются только `confirmed`**.
+  - `status_reason` (text, nullable) — причина текущего статуса (`user_rejected`, `user_deleted`, …) — ADR-0016.
+  - `status_changed_at` (timestamptz) — аудит перехода статуса.
+  - `raw_text` (text) — **исходный текст пользовательского сообщения** (трассируемость R4, повторный разбор; ADR-0017). 1:1 с записью.
+  - артефакты трассировки (ADR-0017): `intent_result`, `parse_artifact`, `model_meta` — итог классификации/парсинга и метаданные модели/версии промпта (поля `entry` либо таблица `entry_trace` 1:1 — свобода реализации в схеме `diary`).
   - `source_task_id` (text, UNIQUE) — идемпотентность at-least-once (дубль не создаёт запись)
 - **`entry_items`**
   - `id` (uuid, PK)
@@ -373,11 +380,11 @@ sequenceDiagram
   - `user_id` (uuid)
   - `local_date` (date)
   - `sent_at` (timestamptz, nullable — null = обработано, но пусто/не отправлено)
-  - `UNIQUE(user_id, local_date)` — рестарт/повторный enqueue не шлёт дубль (US-008, A6). Владелец и единственный писатель — модуль `diary` (исполняется в `diary-worker`), т.к. именно он строит/доставляет сводку. `scheduler` к этой таблице не обращается (строгая развязка ADR-0001).
+  - `UNIQUE(user_id, local_date)` — рестарт/повторный тик не шлёт дубль авто-сводки (US-008, A6). Владелец и единственный писатель — модуль `diary` в составе `api-core` (ADR-0015), т.к. именно `api-core` строит/доставляет сводку. `scheduler` к этой таблице не обращается (строгая развязка ADR-0001).
 
 ### Модуль `scheduler` — без своей схемы БД
 
-`scheduler` — **stateless триггер по времени**: решение «слать ли сводку» принимается им только из текущего времени и `users.timezone` (через сервис `users`). Дедупликацию авто-сводки обеспечивает `diary-worker` через `summary_dispatch` (UNIQUE) — поэтому повторный/перекрывающийся тик `scheduler` безопасен. Своей схемы БД у `scheduler` нет (ранее ошибочно числилась схема `scheduler` с `summary_dispatch` — таблица перенесена во владение `diary`).
+`scheduler` — **stateless триггер по времени**: тикает и дёргает внутренний механизм `api-core` (ADR-0018). Проверку `auto_summary_enabled`, чтение `users.timezone`, дедуп через `summary_dispatch` (UNIQUE) и доставку делает синхронно `api-core` — поэтому повторный/перекрывающийся тик `scheduler` безопасен. Своей схемы БД у `scheduler` нет; в БД и LLM не ходит.
 
 ### Лимитеры (в Redis, не в Postgres)
 
@@ -407,7 +414,8 @@ sequenceDiagram
 
 ## 8. Мониторинг (ADR-0010)
 
-- **Как собираем:** каждый сервис (`core-api`, `core-worker`, `diary-worker`, `scheduler`, `channel-telegram`) экспонирует `/metrics` (prometheus_client); Prometheus делает pull; Redis — через redis_exporter; Postgres — через postgres_exporter. Grafana — дашборды + алерты поверх Prometheus.
+- **Как собираем:** каждый сервис (`api-core`, `processing-worker`, `scheduler`, `channel-telegram`) экспонирует `/metrics` (prometheus_client); Prometheus делает pull; Redis — через redis_exporter; Postgres — через postgres_exporter. Grafana — дашборды + алерты поверх Prometheus.
+- **Трассировка (ADR-0017):** логи/метрики горячего пути обработки сообщения помечаются `task_id` (+`user_id`) для сквозного разбора «сообщение → результат по КБЖУ».
 - **Минимальный набор метрик:**
 
 | Группа | Метрики |
@@ -429,24 +437,19 @@ flowchart LR
   subgraph VPS["Один VPS (docker-compose)"]
     direction TB
     A["channel-telegram (адаптер)"]
-    B["core-api (FastAPI)"]
-    C["core-worker (LLM-only, K-конкурентность)"]
-    H["diary-worker (non-LLM: сводки)"]
+    B["api-core (FastAPI + DB owner + consumer results.processing)"]
+    C["processing-worker (stateless, без БД, K-конкурентность)"]
     I["scheduler (триггер 9:00)"]
-    D["broker (Redis: tasks.llm+tasks.diary+события+результаты+лимитеры)"]
+    D["broker (Redis: tasks.processing+results.processing+события+results.channel+лимитеры)"]
     E["postgres (схемы users/diary)"]
     F["prometheus"]
     G["grafana"]
     A --- D
     B --- D
     C --- D
-    H --- D
-    I --- D
+    I --- B
     A --- B
     B --- E
-    C --- E
-    H --- E
-    I --- E
     F --- G
   end
   A -->|Bot API long polling| TG[[Telegram]]
@@ -454,23 +457,22 @@ flowchart LR
   C -->|HTTPS| OFF[[OpenFoodFacts]]
 ```
 
-**Деплой-юниты (явный перечень, 9):**
+**Деплой-юниты (явный перечень, 8 — ADR-0015):**
 1. `channel-telegram` — адаптер канала.
-2. `core-api` — HTTP-фасад ядра (FastAPI).
-3. `core-worker` — **LLM-only** воркер очереди `tasks.llm` (1 реплика, K=2–4).
-4. `diary-worker` — **non-LLM** воркер очереди `tasks.diary` (генерация/доставка сводок US-007/US-008).
-5. `scheduler` — отдельный лёгкий триггер периодических работ (enqueue `build_summary` в 9:00).
-6. `broker` — Redis (очереди задач `tasks.llm`/`tasks.diary`, шина событий, топик результатов, лимитеры OFF и LLM).
-7. `postgres` — БД (логические схемы-владельцы).
-8. `prometheus` — сбор метрик.
-9. `grafana` — дашборды/алерты.
+2. `api-core` — HTTP-фасад ядра (FastAPI), единственный владелец БД, потребитель `results.processing`.
+3. `processing-worker` — stateless async-воркер очереди `tasks.processing` (1 реплика, K=2–4; БД не касается).
+4. `scheduler` — отдельный лёгкий триггер 09:00 (дёргает синхронную авто-сводку `api-core`).
+5. `broker` — Redis (очередь `tasks.processing`, обратный топик `results.processing`, шина событий, топики `results.<channel>`, лимитеры OFF и LLM).
+6. `postgres` — БД (логические схемы-владельцы).
+7. `prometheus` — сбор метрик.
+8. `grafana` — дашборды/алерты.
 
 - Оркестрация — **docker-compose** на одном VPS. Граница ядро/адаптер реальная (сеть), но всё на одном хосте — деплой простой.
 - Миграции схемы (Alembic, ADR-0014) применяются при запуске compose (one-shot шаг до старта сервисов); ручные `ALTER` в проде запрещены.
-- Telegram: **long polling** в MVP (без публичного HTTPS/вебхука). `core-api` слушает HTTP только внутри compose-сети (плюс `/metrics`).
+- Telegram: **long polling** в MVP (без публичного HTTPS/вебхука). `api-core` слушает HTTP только внутри compose-сети (публичных эндпоинтов нет; `/v1/internal/auto-summary` — только из compose-сети; плюс `/metrics`).
 - Соответствует «деплой стоит с самого начала» (workflow п.3); распределённость реальная (брокер, отдельные процессы), но один деплой-таргет.
 
-> Рекомендация (ADR-0013): `scheduler` и `diary-worker` — **отдельные деплой-юниты**, чтобы жизненный цикл периодических/non-LLM работ не зависел от LLM-воркера. Оба non-LLM и при желании могут быть слиты в один lightweight-процесс позже без изменения контрактов — обратимо.
+> Рекомендация (ADR-0015): `scheduler` — **отдельный лёгкий деплой-юнит**, чтобы жизненный цикл периодического триггера не зависел от рестартов `api-core`. `processing-worker` отделён от `api-core`, т.к. это единственная async/лимитируемая часть — масштабируется репликами независимо (ADR-0005). `api-core` совмещает web-фасад и потребителя `results.processing`; при росте делится на web и orchestrator без изменения контрактов — обратимо.
 
 ---
 
@@ -493,18 +495,21 @@ flowchart LR
 
 | US / требование | Где в архитектуре |
 |---|---|
-| US-001 регистрация / `/start` | `core-api` (регистрация), модуль `users`, схема `users` |
-| US-002 лог еды свободным текстом | поток §4.2, модули `parsing`/`nutrition`, очередь |
+| US-001 регистрация / `/start` | `api-core` (регистрация), модуль `users`, схема `users` |
+| US-002 лог еды свободным текстом | поток §4.2, `processing-worker` (`parsing`/`nutrition`), persist в `api-core`, always-write (ADR-0016) |
 | US-003 граммы/порции, оценочный вес | `parsing`, `entry_items.qty_is_estimated` |
 | US-004 КБЖУ + fallback, источник per-item | `nutrition`, `off_client`, `llm`, `entry_items.source` |
-| US-005 per-user подтверждение | `users.confirm_enabled`, `kind=preview` |
+| US-005 per-user подтверждение | `users.confirm_enabled`, `kind=preview`, статусы `pending/confirmed/rejected` (ADR-0016) |
 | US-006 изоляция по пользователю | `diary`, `entries.user_id` |
-| US-007 сводка по запросу | `core-api` enqueue → `diary-worker` → `results.*` (асинхронно, §4.4, ADR-0012) |
-| US-008 авто-сводка 9:00 (primary) | `scheduler` (триггер) → `diary-worker` (строит) → primary, поток §4.3, ADR-0009/0013 |
-| US-009 удаление командой (dev) | `core-api` → `diary`, `users.is_dev`, видимый `entries.id` |
+| US-007 сводка по запросу | `api-core` синхронно (§4.4, ADR-0015); фильтр `status=confirmed` |
+| US-008 авто-сводка 9:00 (primary) | `scheduler` (триггер) → `api-core` синхронно (§4.3, ADR-0009/0018); флаг `auto_summary_enabled` |
+| US-009 удаление командой (dev) | `api-core` → `diary` мягко (`status=deleted`, ADR-0016), `users.is_dev`, видимый `entries.id` |
 | US-010 глобальный лимит OFF | `off_client` + OFF-лимитер в Redis (§7.1) |
-| US-017 классификация намерения | `intent` через `llm` |
+| US-017 классификация намерения | `intent` через `llm` (в `processing-worker`) |
 | A6 пустой день — не слать | `summary_dispatch`, поток §4.3 |
 | A9 источник per-item | `entry_items.source` |
+| Always-write + soft-delete + статус | `entries.status`, инвариант «в сводках только `confirmed`» (ADR-0016) |
+| Отключаемая авто-сводка | `users.auto_summary_enabled` (ADR-0018) |
+| Сквозная трассируемость сообщение→КБЖУ | `task_id` + артефакты `entry` (`intent_result`/`parse_artifact`/`model_meta`) (ADR-0017) |
 | Мульти-канальность (A4 на будущее, активна в MVP по решению автора) | `channel_identities.is_active/is_primary` |
 ```

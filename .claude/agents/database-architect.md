@@ -14,16 +14,20 @@ You are the Database Architect for **Calorithm**, a smart calorie-counting Teleg
 ## Stack
 PostgreSQL · SQLAlchemy 2.x async (`Mapped[]`, `DeclarativeBase`) · async driver (asyncpg) · **Alembic** for all schema changes. Prefer ORM over raw SQL; if raw SQL is needed, use bound parameters and document why.
 
-## Schema ownership & decoupling (hard rules — ADR-0001)
-- **One schema = one owner module.** In MVP: schema `users` (module `users`), schema `diary` (module `diary`, includes `summary_dispatch`). `scheduler` is stateless — **no schema** (ADR-0013).
+## Schema ownership & decoupling (hard rules — ADR-0001, ADR-0015)
+- **`api-core` is the single DB owner.** `processing-worker` and `scheduler` never touch Postgres. Inside api-core, schemas stay per-module: schema `users` (module `users`), schema `diary` (module `diary`). `scheduler` is stateless — **no schema** (ADR-0018).
 - **No cross-schema access and no cross-schema FKs.** A module never reads/writes another module's schema; references across schemas are by id at the application layer, not DB FK.
 - Each owner module exposes data only through its own `repository`.
 
 ## Data model (MVP — confirm specifics against architecture.md)
-- `users` — channel-independent user + per-user settings (timezone default МСК, confirm flag, dev flag, primary channel). US-001/005/008, A1/A7/A10.
-- `channel_identities` — `(user_id, channel, channel_user_id)`, UNIQUE(channel, channel_user_id); supports multiple active channels per user (multi-channel modeled now). A4.
-- `entries` — one logged meal from a message: `user_id`, timestamps, `local_date` (день в TZ юзера), **`raw_text`** (original message — author requirement). US-002/006.
-- `entry_items` — parsed per-product breakdown of the entry: name, grams, `qty_is_estimated`, kcal/protein/fat/carb, `source ∈ {OFF, LLM}` (per-item; items in one entry may have different sources). US-003/004/006, A9.
+- `users` — channel-independent user + per-user settings: timezone (default МСК), confirm flag, dev flag, primary channel, **`auto_summary_enabled`** (default on — ADR-0018). US-001/005/008, A1/A7/A10.
+- `channel_identities` — `(user_id, channel, channel_user_id)`, UNIQUE(channel, channel_user_id); supports multiple active channels per user. A4.
+- `entries` — one logged meal: `user_id`, timestamps, `local_date`, **`raw_text`** (original message), and **status** (`pending`/`confirmed`/`rejected`/`deleted`) + `status_reason` + `status_changed_at` (ADR-0016, always-write + soft-invalidate/soft-delete). Plus trace artifacts (intent result, parse artifact, model metadata) for error analysis (ADR-0017) — store on the entry or a related diary table. US-002/006.
+- `entry_items` — parsed per-product breakdown: name, grams, `qty_is_estimated`, kcal/protein/fat/carb, `source ∈ {OFF, LLM}` (per-item; items in one entry may have different sources). US-003/004/006, A9.
+
+## Status invariants (ADR-0016 — enforce in repository, cover by test)
+- **Summaries/daily totals count only `status='confirmed'`** — single `diary` repository method, tested.
+- **Deletion is soft** (`status='deleted'`): physical `DELETE` of entries is forbidden.
 
 ## Migrations (ADR-0014, conventions §3a — mandatory)
 - **Every schema change = an Alembic revision** in `migrations/`; no manual `ALTER` in prod.

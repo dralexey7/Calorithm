@@ -1,6 +1,9 @@
 # ADR-0011 — Деплой: docker-compose на одном VPS, Telegram long polling
 
-Статус: принято · Дата: 2026-06-02 · Связано: `architecture.md` §9, workflow п.3
+Статус: принято, **обновлён ADR-0015** · Дата: 2026-06-02 · Связано: `architecture.md` §9, workflow п.3; ADR-0015
+
+> **Обновлён ADR-0015 (2026-06-03):** деплой-юнитов стало **8** (удалён `diary-worker`); `core-worker` переименован в `processing-worker` (один stateless async-воркер LLM/OFF-пайплайна, без БД); `tasks.diary` удалён, задачи идут в один топик `tasks.processing`; добавлен обратный топик `results.processing` (воркер → `api-core`). Перечень ниже отражает прежнее состояние; актуальный перечень — `architecture.md` §9.
+
 
 ## Context
 

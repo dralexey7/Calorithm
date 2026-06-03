@@ -30,6 +30,10 @@ Organise feedback as **Critical** (must fix), **Warning** (should fix), **Sugges
 - [ ] No cross-schema access; no cross-schema FKs; module touches only its own schema/`repository`.
 - [ ] Inter-module communication via `bus` events or typed `contracts` DTOs — not shared tables or reaching into another module's internals.
 - [ ] Every LLM call goes through module `llm` (+limiter); every OFF call through `off_client` (+limiter). No bypass.
+- [ ] **`api-core` is the only DB owner** (ADR-0015): `processing-worker`/`scheduler` import no DB driver/repository and never read/write Postgres.
+- [ ] **`api-core` is the only publisher of `results.<channel>`** (ADR-0008); the worker publishes only to `results.processing`.
+- [ ] **Status invariants** (ADR-0016): entries are always-written with a status; summaries count only `confirmed`; deletion is soft (no physical `DELETE`); confirm is a `pending→confirmed` transition without re-running the LLM.
+- [ ] **Traceability** (ADR-0017): `task_id` correlation in logs/metrics; trace artifacts persisted.
 - [ ] Module remains extractable to a service (no hidden coupling).
 
 ### Async correctness

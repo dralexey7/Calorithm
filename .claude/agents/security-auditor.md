@@ -49,7 +49,8 @@ You are the Security Auditor for **Calorithm**, a smart calorie-counting Telegra
 - [ ] All LLM calls via `llm` (+token-bucket limiter); all OFF via `off_client` (+limiter) — no bypass that defeats rate/cost control.
 
 ### API surface
-- [ ] `core-api` not reachable beyond its network boundary except as intended; no leftover debug/admin endpoints.
+- [ ] `api-core` not reachable beyond its network boundary except as intended; no leftover debug/admin endpoints.
+- [ ] Internal endpoints (e.g. `POST /v1/internal/auto-summary`, called by `scheduler`) are reachable only on the internal compose network, not exposed publicly.
 
 ## Output Format
 ```

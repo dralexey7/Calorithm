@@ -21,7 +21,7 @@ You translate user stories into engineering tasks, sequence them, assign them to
 
 Python · FastAPI · PostgreSQL · aiogram · LiteLLM · Redis (broker + limiters) · Alembic (migrations) · Docker · Prometheus + Grafana.
 
-Modular monolith core with strict module/schema decoupling; channels are separate adapter services. **9 deploy units**: `channel-telegram`, `core-api`, `core-worker` (LLM-only), `diary-worker` (non-LLM), `scheduler`, `broker` (Redis), `postgres`, `prometheus`, `grafana`. Async processing via queue (`tasks.llm`, `tasks.diary`) with results delivered on `results.<channel>`.
+Modular monolith core with strict module/schema decoupling; channels are separate adapter services. **8 deploy units** (ADR-0015): `channel-telegram`, `api-core` (FastAPI + sole DB owner + consumer of `results.processing`), `processing-worker` (stateless LLM/OFF pipeline, no DB), `scheduler` (stateless 9:00 trigger), `broker` (Redis), `postgres`, `prometheus`, `grafana`. Only LLM/OFF work is async: food messages → `tasks.processing` → worker → `results.processing` → api-core persists and publishes `results.<channel>`. Summaries/settings/users/deletion are synchronous in api-core. Entries are always-written with a status; summaries count only `confirmed`; deletion is soft (ADR-0016).
 
 ## Specialist Agents You Coordinate
 

@@ -18,7 +18,7 @@ Python · FastAPI · PostgreSQL · aiogram · LiteLLM · Redis · Docker · **Al
 
 ## 2. Структура проекта и модулей
 
-Один репозиторий. Деплой-юниты (`channel-telegram`, `core-api`, `core-worker`, `diary-worker`, `scheduler`) собирают свои образы, переиспользуя общий код ядра.
+Один репозиторий. Деплой-юниты (`channel-telegram`, `api-core`, `processing-worker`, `scheduler`) собирают свои образы, переиспользуя общий код ядра (ADR-0015).
 
 Ориентир структуры (свобода в деталях, инварианты — ниже):
 
@@ -27,7 +27,7 @@ calorithm/
   core/
     users/         # модуль-владелец схемы users
     diary/         # модуль-владелец схемы diary (вкл. summary_dispatch)
-    scheduler/     # stateless триггер 9:00 (без своей схемы — ADR-0013)
+    scheduler/     # stateless триггер 9:00 (без своей схемы; дёргает api-core — ADR-0018)
     intent/        # stateless
     parsing/       # stateless
     nutrition/     # stateless (+опц. кеш)
@@ -37,10 +37,9 @@ calorithm/
     config/        # Pydantic Settings
     contracts/     # общие DTO/события (Pydantic) — публичные типы границ
   apps/
-    core_api/      # FastAPI-приложение (core-api)
-    core_worker/   # LLM-only потребитель tasks.llm (ADR-0013)
-    diary_worker/  # non-LLM потребитель tasks.diary: генерация/доставка сводок (ADR-0013)
-    scheduler/     # лёгкий триггер периодических работ (enqueue build_summary в 9:00)
+    api_core/          # FastAPI-приложение api-core: HTTP-фасад + единственный владелец БД + потребитель results.processing (ADR-0015)
+    processing_worker/ # stateless потребитель tasks.processing (LLM/OFF-пайплайн, без БД) (ADR-0015)
+    scheduler/         # лёгкий триггер 9:00 (дёргает синхронную авто-сводку api-core) (ADR-0018)
     channel_telegram/  # адаптер aiogram
   migrations/      # ревизии Alembic (изменения схемы БД — ADR-0014)
   tests/
@@ -53,12 +52,15 @@ calorithm/
 
 ## 3. Правила развязки модулей и владения схемами (ADR-0001 — обязательно)
 
-1. **Одна схема БД — один владелец-модуль.** Схемы `users`, `diary` принадлежат одноимённым модулям (`summary_dispatch` — в схеме `diary`). Модуль `scheduler` — stateless-триггер без своей схемы (ADR-0013).
+1. **Одна схема БД — один владелец-модуль.** Схемы `users`, `diary` принадлежат одноимённым модулям (`summary_dispatch` — в схеме `diary`); обе живут в `api-core` — единственном владельце БД (ADR-0015). Модуль `scheduler` — stateless-триггер без своей схемы (ADR-0018).
 2. **Запрет кросс-схемного доступа.** Модуль НЕ читает/пишет чужую схему, НЕ импортирует чужой `repository`, нет кросс-схемных FK.
 3. **Межмодульное общение — только через `bus`** (события) или через публичный сервисный интерфейс модуля с типизированными DTO. Не через общие таблицы.
 4. **Зависимости — через `contracts`** (Pydantic DTO/события), не через импорт чужих внутренностей.
 5. **Цель — механический вынос:** любой модуль должен поддаваться выносу в отдельный сервис заменой in-process вызова на HTTP/событие без переписывания логики. Если код это нарушает — это дефект развязки и блокирует ревью.
 6. **LLM и OFF — единственные точки.** Любой LLM-вызов — через модуль `llm` (с проходом через LLM-лимитер); любое обращение к OFF — через `off_client` (с OFF-лимитером). Обход запрещён.
+7. **`api-core` — единственный владелец БД (ADR-0015).** `processing-worker` к Postgres **не обращается** (ни чтение, ни запись); он возвращает `ProcessingResult`, persist делает `api-core`. Прямой импорт драйвера/репозитория БД в `processing-worker`/`scheduler` — дефект, блокирует ревью.
+8. **`api-core` — единственный публикатор `results.<channel>` (ADR-0008/0015).** Воркер публикует только в `results.processing`; `scheduler` в `results.*` не публикует.
+9. **Статус-инвариант сводок (ADR-0016).** Сводки и дневные итоги учитывают только `entries.status='confirmed'`; фильтр — в единственном repository-методе модуля `diary`, покрыт тестом. Удаление — мягкое (`status='deleted'`), физический `DELETE` записей запрещён.
 
 ---
 

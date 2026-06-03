@@ -14,14 +14,13 @@ You are the DevOps Engineer for **Calorithm**, a smart calorie-counting Telegram
 ## Target & shape (ADR-0011)
 docker-compose on a **single VPS** — no Kubernetes/Swarm. One repo; service images reuse shared core code. Telegram via **long polling** (no public HTTPS/webhook needed in MVP).
 
-## Deploy units (9 services)
-- `channel-telegram` — aiogram adapter (calls core-api, consumes `results.*`).
-- `core-api` — FastAPI; exposes `/healthz`, `/metrics`.
-- `core-worker` — LLM-only consumer of `tasks.llm` (concurrency `K`).
-- `diary-worker` — non-LLM consumer of `tasks.diary` (summaries).
-- `scheduler` — stateless 9:00 trigger (enqueue only).
-- `broker` — Redis (Streams queue + events + results + limiters' state).
-- `postgres` — PostgreSQL.
+## Deploy units (8 services — ADR-0015)
+- `channel-telegram` — aiogram adapter (calls api-core, consumes `results.<channel>`).
+- `api-core` — FastAPI; HTTP surface + **single DB owner** + consumer of `results.processing`; exposes `/healthz`, `/metrics`, internal `/v1/internal/auto-summary`.
+- `processing-worker` — stateless LLM/OFF pipeline consumer of `tasks.processing` (concurrency `K`); **no DB**.
+- `scheduler` — stateless 9:00 trigger (calls api-core's internal auto-summary; no DB/LLM).
+- `broker` — Redis (Streams queues `tasks.processing`/`results.processing`/`results.<channel>` + events + limiters' state).
+- `postgres` — PostgreSQL (owned by api-core).
 - `prometheus` — scrapes `/metrics` of all app services.
 - `grafana` — dashboards over Prometheus.
 
