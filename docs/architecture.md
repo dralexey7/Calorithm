@@ -331,12 +331,14 @@ sequenceDiagram
 
 ## 6. Модель данных MVP
 
-Строгая развязка: каждая схема принадлежит одному модулю, кросс-схемных FK и кросс-чтений нет (ADR-0001). Типы — ориентир; точные DDL — на этапе реализации (свобода реализации в рамках инвариантов ниже).
+> **Детальная схема БД (DDL, типы, ограничения, индексы, последовательность миграций) — в [`docs/data-model.md`](data-model.md).** Этот раздел содержит только архитектурные инварианты и обзор; `data-model.md` является авторитетным источником для реализации.
+
+Строгая развязка: каждая схема принадлежит одному модулю, кросс-схемных FK и кросс-чтений нет (ADR-0001). Типы — ориентир; точные DDL — в `docs/data-model.md` (свобода реализации в рамках инвариантов ниже).
 
 ### Схема `users` (владелец — модуль `users`)
 
 - **`users`**
-  - `id` (uuid, PK)
+  - `id` (bigint, PK, GENERATED ALWAYS AS IDENTITY)
   - `created_at` (timestamptz)
   - `timezone` (text, по умолчанию `Europe/Moscow`) — A1
   - `confirm_enabled` (bool, по умолчанию `false`) — US-005, A7
@@ -344,40 +346,41 @@ sequenceDiagram
   - `is_dev` (bool, по умолчанию `false`) — US-009, A10
   - инвариант: настройки per-user; смена TZ вне MVP (US-013), но поле есть.
 - **`channel_identities`**
-  - `id` (uuid, PK)
-  - `user_id` (uuid → `users.id`, в пределах схемы)
+  - `id` (bigint, PK, GENERATED ALWAYS AS IDENTITY)
+  - `user_id` (bigint → `users.id`, в пределах схемы)
   - `channel` (text, напр. `telegram`)
   - `channel_user_id` (text) — внешний id в канале
   - `is_active` (bool) — активная мульти-канальность (несколько активных каналов на пользователя)
   - `is_primary` (bool) — целевой канал авто-сводки (ADR-0009)
   - `created_at`, `last_seen_at` (timestamptz)
-  - инварианты: `UNIQUE(channel, channel_user_id)`; **ровно один `is_primary=true` среди активных каналов пользователя** (обеспечивается логикой `users` при смене primary).
+  - инварианты: `UNIQUE(channel, channel_user_id)`; **ровно один `is_primary=true` среди активных каналов пользователя** — обеспечивается partial UNIQUE index (`UNIQUE (user_id) WHERE is_primary AND is_active`) на уровне БД + транзакционным методом в репозитории.
 
 ### Схема `diary` (владелец — модуль `diary`)
 
 **Подтверждённая семантика:** `entry` = **один залогированный приём пищи из одного сообщения**; `entry_items` = распарсенные **позиции-продукты** внутри этого приёма (имя, граммы, КБЖУ, источник). Исходный текст сообщения хранится **на уровне `entry`** (`entries.raw_text`), а не отдельной сущностью сообщений: одно сообщение → одна запись, отдельная таблица сообщений избыточна для MVP (1:1 с `entry`) и нарушала бы простоту; при будущей потребности (например, несколько записей из одного сообщения) выделение сущности `messages` обратимо.
 
 - **`entries`**
-  - `id` (uuid/serial, PK; видимый id для dev-удаления US-009)
-  - `user_id` (uuid) — изоляция по пользователю (US-006)
+  - `id` (bigint, PK, GENERATED ALWAYS AS IDENTITY; видимый id для dev-удаления US-009 — удобное короткое число)
+  - `user_id` (bigint) — изоляция по пользователю (US-006)
   - `created_at_utc` (timestamptz)
   - `local_date` (date) — «день» в TZ пользователя (US-002, US-007)
-  - `status` (enum `pending | confirmed | rejected | deleted`) — статусная модель always-write (ADR-0016); **в сводках учитываются только `confirmed`**.
+  - `status` (text, CHECK ∈ {`pending`,`confirmed`,`rejected`,`deleted`}) — статусная модель always-write (ADR-0016); **в сводках учитываются только `confirmed`**.
   - `status_reason` (text, nullable) — причина текущего статуса (`user_rejected`, `user_deleted`, …) — ADR-0016.
   - `status_changed_at` (timestamptz) — аудит перехода статуса.
   - `raw_text` (text) — **исходный текст пользовательского сообщения** (трассируемость R4, повторный разбор; ADR-0017). 1:1 с записью.
-  - артефакты трассировки (ADR-0017): `intent_result`, `parse_artifact`, `model_meta` — итог классификации/парсинга и метаданные модели/версии промпта (поля `entry` либо таблица `entry_trace` 1:1 — свобода реализации в схеме `diary`).
+  - артефакты трассировки (ADR-0017): `intent_result`, `parse_artifact`, `model_meta` (JSONB, nullable) — итог классификации/парсинга и метаданные модели/версии промпта; хранятся как поля `entry`.
   - `source_task_id` (text, UNIQUE) — идемпотентность at-least-once (дубль не создаёт запись)
 - **`entry_items`**
-  - `id` (uuid, PK)
-  - `entry_id` (→ `entries.id`, в пределах схемы)
+  - `id` (bigint, PK, GENERATED ALWAYS AS IDENTITY)
+  - `entry_id` (bigint → `entries.id`, в пределах схемы)
   - `name` (text)
   - `qty_grams` (numeric)
   - `qty_is_estimated` (bool) — оценочный вес (US-003)
   - `kcal`, `protein`, `fat`, `carb` (numeric) — КБЖУ
-  - `source` (enum `OFF | LLM`) — **источник per-item** (US-004, A9): разные продукты одной записи могут иметь разные источники, у каждого продукта источник один.
+  - `source` (text, CHECK ∈ {`OFF`,`LLM`}) — **источник per-item** (US-004, A9): разные продукты одной записи могут иметь разные источники, у каждого продукта источник один.
 - **`summary_dispatch`** (в схеме `diary`)
-  - `user_id` (uuid)
+  - `id` (bigint, PK, GENERATED ALWAYS AS IDENTITY)
+  - `user_id` (bigint)
   - `local_date` (date)
   - `sent_at` (timestamptz, nullable — null = обработано, но пусто/не отправлено)
   - `UNIQUE(user_id, local_date)` — рестарт/повторный тик не шлёт дубль авто-сводки (US-008, A6). Владелец и единственный писатель — модуль `diary` в составе `api-core` (ADR-0015), т.к. именно `api-core` строит/доставляет сводку. `scheduler` к этой таблице не обращается (строгая развязка ADR-0001).
