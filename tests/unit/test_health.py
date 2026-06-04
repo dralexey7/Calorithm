@@ -15,31 +15,34 @@ What is verified and why:
 """
 
 import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock
-
 
 # ---------------------------------------------------------------------------
 # Helpers — dependency override factories
 # ---------------------------------------------------------------------------
 
+
 def _make_db_probe_ok():
     """Returns an async callable that simulates a successful DB probe."""
+
     async def probe():
         return True  # DB is reachable
+
     return probe
 
 
 def _make_db_probe_fail():
     """Returns an async callable that simulates a failed DB probe."""
+
     async def probe():
         raise ConnectionRefusedError("Test: DB unreachable")
+
     return probe
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_healthz_returns_200_when_db_is_available(api_client):
@@ -48,8 +51,8 @@ async def test_healthz_returns_200_when_db_is_available(api_client):
     Confirms the endpoint is alive and the liveness check passes (C1 plan §5).
     """
     # Override DB dependency before the client is used
-    from apps.api_core.main import app  # noqa: PLC0415
-    from apps.api_core.health import get_db_probe  # noqa: PLC0415
+    from apps.api_core.health import get_db_probe
+    from apps.api_core.main import app
 
     app.dependency_overrides[get_db_probe] = _make_db_probe_ok
 
@@ -66,8 +69,8 @@ async def test_healthz_response_body_contains_ok_status(api_client):
     GET /healthz 200 response body must indicate an 'ok' status.
     Provides a machine-readable health signal beyond HTTP status code (C1 plan §5).
     """
-    from apps.api_core.main import app  # noqa: PLC0415
-    from apps.api_core.health import get_db_probe  # noqa: PLC0415
+    from apps.api_core.health import get_db_probe
+    from apps.api_core.main import app
 
     app.dependency_overrides[get_db_probe] = _make_db_probe_ok
 
@@ -89,8 +92,8 @@ async def test_healthz_returns_non_200_when_db_is_unavailable(api_client):
     Ensures healthcheck honestly signals dependency failure rather than lying
     about liveness (C1 plan §5, Q-C1-3 — foundation for deploy readiness probes).
     """
-    from apps.api_core.main import app  # noqa: PLC0415
-    from apps.api_core.health import get_db_probe  # noqa: PLC0415
+    from apps.api_core.health import get_db_probe
+    from apps.api_core.main import app
 
     app.dependency_overrides[get_db_probe] = _make_db_probe_fail
 
@@ -110,8 +113,8 @@ async def test_healthz_db_unavailable_returns_json_not_stack_trace(api_client):
     Prevents information leakage and ensures structured error responses
     (conventions §5 — no stack traces exposed externally).
     """
-    from apps.api_core.main import app  # noqa: PLC0415
-    from apps.api_core.health import get_db_probe  # noqa: PLC0415
+    from apps.api_core.health import get_db_probe
+    from apps.api_core.main import app
 
     app.dependency_overrides[get_db_probe] = _make_db_probe_fail
 

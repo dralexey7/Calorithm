@@ -10,20 +10,34 @@ Scope summary:
 """
 
 import os
+
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
 
+# Ensure apps.api_core.main.app can be imported in unit tests without a real
+# database: set a dummy DATABASE_URL unless one is already provided. The engine
+# is lazy and unit tests override the DB probe, so this URL is never connected.
+# Config tests use the `clean_env` fixture to remove it and exercise fail-fast.
+os.environ.setdefault(
+    "DATABASE_URL",
+    "postgresql+asyncpg://placeholder:placeholder@localhost/placeholder",
+)
 
 # ---------------------------------------------------------------------------
 # ENV helpers
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
-def clean_env(monkeypatch):
+def clean_env(monkeypatch, tmp_path):
     """
     Remove all Calorithm-relevant ENV variables so each config test starts
     from a clean slate — avoids leakage from a developer's real .env file.
+
+    Also redirects Pydantic-Settings' env_file to a non-existent path inside
+    a temporary directory, so that a real `.env` file present in the repo root
+    (created for local compose runs) does not bleed into unit tests.
     """
     keys = [
         "DATABASE_URL",
@@ -42,12 +56,28 @@ def clean_env(monkeypatch):
     ]
     for key in keys:
         monkeypatch.delenv(key, raising=False)
+
+    # Patch Settings so it reads env_file from a path that does not exist,
+    # preventing any real .env file in the project root from being picked up.
+    nonexistent_env = str(tmp_path / ".env.nonexistent")
+
+    # Monkey-patch the model_config on the Settings class to point at the
+    # nonexistent path.  We import lazily to avoid triggering Settings.__init__
+    # at fixture-setup time (DATABASE_URL is not yet set).
+    from core.config.settings import Settings
+
+    original_config = Settings.model_config.copy()
+    new_config = dict(original_config)
+    new_config["env_file"] = nonexistent_env
+    monkeypatch.setattr(Settings, "model_config", new_config)
+
     return monkeypatch
 
 
 # ---------------------------------------------------------------------------
 # Integration: real Postgres
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="session")
 def test_db_url():
@@ -91,6 +121,7 @@ def test_db_url():
 # ASGI client for api-core
 # ---------------------------------------------------------------------------
 
+
 @pytest_asyncio.fixture()
 async def api_client():
     """
@@ -108,9 +139,7 @@ async def api_client():
     directly, which is the interface required from apps.api_core.main for C1-T04.
     This keeps the mock path and the real-DB path completely separate.
     """
-    from apps.api_core.main import app  # noqa: PLC0415 — intentional late import
+    from apps.api_core.main import app
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client

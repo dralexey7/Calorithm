@@ -34,7 +34,7 @@ With an explicit DB:
 
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
 
 pytestmark = pytest.mark.integration
 
@@ -42,6 +42,7 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest_asyncio.fixture()
 async def api_client_with_real_db(test_db_url: str):
@@ -56,12 +57,10 @@ async def api_client_with_real_db(test_db_url: str):
     If create_app() does not exist yet, this will ImportError (correct red
     phase: implementation missing, tests failing for the right reason).
     """
-    from apps.api_core.main import create_app  # noqa: PLC0415 — intentional late import
+    from apps.api_core.main import create_app
 
     app = create_app(database_url=test_db_url)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
 
 
@@ -78,20 +77,19 @@ async def api_client_with_unreachable_db():
     Verifies fail-closed behaviour: the healthcheck must return 503, not 200,
     when the DB is genuinely unreachable.
     """
-    from apps.api_core.main import create_app  # noqa: PLC0415 — intentional late import
+    from apps.api_core.main import create_app
 
     # Port 1 is reserved/always-closed; asyncpg will fail to connect for real.
     unreachable_url = "postgresql+asyncpg://nobody:nopass@localhost:1/nonexistent"
     app = create_app(database_url=unreachable_url)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
 
 
 # ---------------------------------------------------------------------------
 # Positive path — real Postgres reachable
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_healthz_real_db_returns_200(api_client_with_real_db):
@@ -122,14 +120,15 @@ async def test_healthz_real_db_response_body_status_ok(api_client_with_real_db):
     response = await api_client_with_real_db.get("/healthz")
     data = response.json()
     assert "status" in data, "Response body must contain a 'status' field"
-    assert data["status"] == "ok", (
-        f"Expected status 'ok' with real DB connected, got: {data['status']!r}"
-    )
+    assert (
+        data["status"] == "ok"
+    ), f"Expected status 'ok' with real DB connected, got: {data['status']!r}"
 
 
 # ---------------------------------------------------------------------------
 # Negative path — unreachable DB (real failure, not a mock)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_healthz_unreachable_db_returns_503(api_client_with_unreachable_db):
@@ -144,9 +143,9 @@ async def test_healthz_unreachable_db_returns_503(api_client_with_unreachable_db
     (C1 plan §5, Q-C1-3; conventions §5 — honest error propagation).
     """
     response = await api_client_with_unreachable_db.get("/healthz")
-    assert response.status_code == 503, (
-        f"Expected 503 when DB is unreachable, got {response.status_code}"
-    )
+    assert (
+        response.status_code == 503
+    ), f"Expected 503 when DB is unreachable, got {response.status_code}"
 
 
 @pytest.mark.asyncio
@@ -167,6 +166,6 @@ async def test_healthz_unreachable_db_returns_json_not_traceback(api_client_with
     body_text = str(data)
     # Python traceback markers must not leak into the HTTP response body
     assert "Traceback" not in body_text, "Stack trace must not be exposed in response"
-    assert "asyncpg" not in body_text, (
-        "Internal driver details (asyncpg) must not be exposed in response"
-    )
+    assert (
+        "asyncpg" not in body_text
+    ), "Internal driver details (asyncpg) must not be exposed in response"

@@ -28,9 +28,9 @@ What is verified and why:
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncConnection
-from alembic.config import Config as AlembicConfig
 from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 pytestmark = pytest.mark.integration
 
@@ -39,6 +39,7 @@ pytestmark = pytest.mark.integration
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_alembic_cfg(db_url: str) -> AlembicConfig:
     """
     Build an Alembic Config pointing at our alembic.ini and overriding
@@ -46,9 +47,8 @@ def _make_alembic_cfg(db_url: str) -> AlembicConfig:
     the developer's real DB.
     """
     import os
-    repo_root = os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..")
-    )
+
+    repo_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
     cfg = AlembicConfig(os.path.join(repo_root, "alembic.ini"))
     # Alembic sync URL (psycopg2 / asyncpg URL needs stripping for sync ops)
     sync_url = db_url.replace("+asyncpg", "").replace("+aiosqlite", "")
@@ -59,10 +59,7 @@ def _make_alembic_cfg(db_url: str) -> AlembicConfig:
 async def _schema_exists(conn: AsyncConnection, schema_name: str) -> bool:
     """Returns True if the given schema exists in the connected Postgres DB."""
     result = await conn.execute(
-        sa.text(
-            "SELECT 1 FROM information_schema.schemata "
-            "WHERE schema_name = :schema"
-        ),
+        sa.text("SELECT 1 FROM information_schema.schemata " "WHERE schema_name = :schema"),
         {"schema": schema_name},
     )
     return result.scalar() is not None
@@ -83,6 +80,7 @@ async def _tables_in_schema(conn: AsyncConnection, schema_name: str) -> list[str
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest_asyncio.fixture()
 async def migrated_engine(test_db_url: str):
@@ -107,6 +105,7 @@ async def migrated_engine(test_db_url: str):
 # Tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_migration_0001_upgrade_applies_without_error(test_db_url: str):
     """
@@ -128,9 +127,9 @@ async def test_migration_0001_creates_users_schema(migrated_engine):
     C1 goal: `CREATE SCHEMA users` (data-model §7, §3 conventions).
     """
     async with migrated_engine.connect() as conn:
-        assert await _schema_exists(conn, "users"), (
-            "Schema 'users' was not created by migration 0001"
-        )
+        assert await _schema_exists(
+            conn, "users"
+        ), "Schema 'users' was not created by migration 0001"
 
 
 @pytest.mark.asyncio
@@ -140,9 +139,9 @@ async def test_migration_0001_creates_diary_schema(migrated_engine):
     C1 goal: `CREATE SCHEMA diary` (data-model §7, §3 conventions).
     """
     async with migrated_engine.connect() as conn:
-        assert await _schema_exists(conn, "diary"), (
-            "Schema 'diary' was not created by migration 0001"
-        )
+        assert await _schema_exists(
+            conn, "diary"
+        ), "Schema 'diary' was not created by migration 0001"
 
 
 @pytest.mark.asyncio
@@ -154,9 +153,9 @@ async def test_migration_0001_no_business_tables_in_users_schema(migrated_engine
     """
     async with migrated_engine.connect() as conn:
         tables = await _tables_in_schema(conn, "users")
-        assert tables == [], (
-            f"Unexpected business tables in schema 'users' after migration 0001: {tables}"
-        )
+        assert (
+            tables == []
+        ), f"Unexpected business tables in schema 'users' after migration 0001: {tables}"
 
 
 @pytest.mark.asyncio
@@ -167,9 +166,9 @@ async def test_migration_0001_no_business_tables_in_diary_schema(migrated_engine
     """
     async with migrated_engine.connect() as conn:
         tables = await _tables_in_schema(conn, "diary")
-        assert tables == [], (
-            f"Unexpected business tables in schema 'diary' after migration 0001: {tables}"
-        )
+        assert (
+            tables == []
+        ), f"Unexpected business tables in schema 'diary' after migration 0001: {tables}"
 
 
 @pytest.mark.asyncio
@@ -210,11 +209,11 @@ async def test_migration_0001_downgrade_removes_schemas(test_db_url: str):
     engine = create_async_engine(test_db_url, echo=False)
     try:
         async with engine.connect() as conn:
-            assert not await _schema_exists(conn, "users"), (
-                "Schema 'users' still exists after downgrade"
-            )
-            assert not await _schema_exists(conn, "diary"), (
-                "Schema 'diary' still exists after downgrade"
-            )
+            assert not await _schema_exists(
+                conn, "users"
+            ), "Schema 'users' still exists after downgrade"
+            assert not await _schema_exists(
+                conn, "diary"
+            ), "Schema 'diary' still exists after downgrade"
     finally:
         await engine.dispose()

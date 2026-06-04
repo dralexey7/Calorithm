@@ -1,0 +1,123 @@
+# Calorithm — docker-compose (C1 walking skeleton).
+#
+# Services:
+#   postgres   — PostgreSQL 16 (internal only; port NOT published to host).
+#   migrate    — one-shot: applies `alembic upgrade head` then exits.
+#   api-core   — FastAPI app; depends on migrate completing successfully.
+#
+# Security / conventions:
+#   - postgres/broker ports are NOT bound to 0.0.0.0 (internal network only).
+#   - All secrets via environment variables; no hardcoded values here.
+#   - Copy .env.example → .env and fill in values before running.
+#
+# Usage:
+#   cp .env.example .env   # fill in values
+#   docker compose up -d --build
+#   curl http://localhost:8000/healthz
+
+services:
+
+  # --------------------------------------------------------------------------
+  # Backing store: PostgreSQL 16
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Do NOT publish port to host — postgres is internal.
+    # Other services reach it via the internal `calorithm_net` network.
+    networks:
+      - calorithm_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --------------------------------------------------------------------------
+  # One-shot migration runner: runs `alembic upgrade head` then exits.
+  # Uses the same image as api-core (no extra image needed).
+  # api-core depends on this service completing successfully.
+  # --------------------------------------------------------------------------
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: calorithm-api-core:latest
+    # Override the default CMD to run migrations then exit.
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      # Alembic env.py reads DATABASE_URL and converts async→sync driver.
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - calorithm_net
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # --------------------------------------------------------------------------
+  # Application: api-core (FastAPI + uvicorn)
+  # --------------------------------------------------------------------------
+  api-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: calorithm-api-core:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      APP_ENV: ${APP_ENV:-production}
+    ports:
+      # Publish HTTP to host so external traffic can reach the API.
+      # Change 8000 to any port you prefer (left side = host port).
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - calorithm_net
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+# --------------------------------------------------------------------------
+# Volumes
+# --------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    driver: local
+
+# --------------------------------------------------------------------------
+# Networks — internal bridge; backing services not reachable from host.
+# --------------------------------------------------------------------------
+networks:
+  calorithm_net:
+    driver: bridge

@@ -19,7 +19,6 @@ What is verified and why:
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Prometheus text format helpers
 # ---------------------------------------------------------------------------
@@ -45,6 +44,7 @@ def _is_valid_prometheus_exposition(body: str) -> bool:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_metrics_returns_200(api_client):
@@ -80,9 +80,9 @@ async def test_metrics_body_contains_at_least_one_sample_line(api_client):
     output rather than an empty or stub response (ADR-0010).
     """
     response = await api_client.get("/metrics")
-    assert _is_valid_prometheus_exposition(response.text), (
-        "Response body does not contain any Prometheus sample lines"
-    )
+    assert _is_valid_prometheus_exposition(
+        response.text
+    ), "Response body does not contain any Prometheus sample lines"
 
 
 @pytest.mark.asyncio

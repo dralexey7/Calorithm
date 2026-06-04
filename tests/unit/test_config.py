@@ -14,12 +14,13 @@ What is verified and why:
 
 import os
 import re
-import pytest
 
+import pytest
 
 # ---------------------------------------------------------------------------
 # Happy path: DATABASE_URL loaded from ENV
 # ---------------------------------------------------------------------------
+
 
 def test_settings_loads_database_url_from_env(clean_env):
     """
@@ -29,15 +30,16 @@ def test_settings_loads_database_url_from_env(clean_env):
     """
     clean_env.setenv("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost/test")
 
-    from core.config.settings import Settings  # noqa: PLC0415
+    from core.config.settings import Settings
 
-    settings = Settings()
+    settings = Settings()  # type: ignore[call-arg]
     assert settings.database_url == "postgresql+asyncpg://user:pass@localhost/test"
 
 
 # ---------------------------------------------------------------------------
 # Fail-fast: missing required variable raises at init time
 # ---------------------------------------------------------------------------
+
 
 def test_settings_raises_on_missing_database_url(clean_env):
     """
@@ -48,8 +50,9 @@ def test_settings_raises_on_missing_database_url(clean_env):
     """
     # DATABASE_URL intentionally not set
     with pytest.raises(Exception) as exc_info:
-        from core.config.settings import Settings  # noqa: PLC0415
-        Settings()
+        from core.config.settings import Settings
+
+        Settings()  # type: ignore[call-arg]
 
     # The error must mention the missing field — not a generic crash
     error_text = str(exc_info.value).lower()
@@ -60,6 +63,7 @@ def test_settings_raises_on_missing_database_url(clean_env):
 # Secret hygiene: DATABASE_URL must not appear in repr / str
 # ---------------------------------------------------------------------------
 
+
 def test_settings_database_url_not_in_repr(clean_env):
     """
     The DATABASE_URL value (which contains credentials) must not appear in
@@ -69,9 +73,9 @@ def test_settings_database_url_not_in_repr(clean_env):
     secret_url = "postgresql+asyncpg://admin:SUPERSECRET@db.host/prod"
     clean_env.setenv("DATABASE_URL", secret_url)
 
-    from core.config.settings import Settings  # noqa: PLC0415
+    from core.config.settings import Settings
 
-    settings = Settings()
+    settings = Settings()  # type: ignore[call-arg]
     representation = repr(settings) + str(settings)
 
     # The literal password fragment must not be visible
@@ -81,6 +85,7 @@ def test_settings_database_url_not_in_repr(clean_env):
 # ---------------------------------------------------------------------------
 # .env.example completeness: every example key maps to a Settings field
 # ---------------------------------------------------------------------------
+
 
 def test_env_example_keys_match_settings_fields(clean_env):
     """
@@ -93,9 +98,7 @@ def test_env_example_keys_match_settings_fields(clean_env):
     __fields__ (Pydantic v1).  The comparison is case-insensitive because
     Pydantic Settings lowercases ENV keys by default.
     """
-    env_example_path = os.path.join(
-        os.path.dirname(__file__), "..", "..", ".env.example"
-    )
+    env_example_path = os.path.join(os.path.dirname(__file__), "..", "..", ".env.example")
     env_example_path = os.path.normpath(env_example_path)
 
     if not os.path.exists(env_example_path):
@@ -118,7 +121,7 @@ def test_env_example_keys_match_settings_fields(clean_env):
 
     # Import only after we know the file is there
     clean_env.setenv("DATABASE_URL", "postgresql+asyncpg://x:x@localhost/x")
-    from core.config.settings import Settings  # noqa: PLC0415
+    from core.config.settings import Settings
 
     # Pydantic v2 uses model_fields; v1 uses __fields__
     try:
@@ -127,6 +130,4 @@ def test_env_example_keys_match_settings_fields(clean_env):
         declared_fields = set(Settings.__fields__.keys())  # type: ignore[attr-defined]
 
     orphaned = [k for k in example_keys if k not in declared_fields]
-    assert not orphaned, (
-        f".env.example contains keys not declared in Settings: {orphaned}"
-    )
+    assert not orphaned, f".env.example contains keys not declared in Settings: {orphaned}"

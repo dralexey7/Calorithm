@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Lint + format check
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & format (ruff)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.x"
+
+      - name: Install dev dependencies
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Check formatting
+        run: ruff format --check .
+
+      - name: Run linter
+        run: ruff check .
+
+  # ---------------------------------------------------------------------------
+  # Type check
+  # ---------------------------------------------------------------------------
+  typecheck:
+    name: Type check (pyright)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.x"
+
+      - name: Install dev dependencies
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Run pyright
+        run: pyright
+
+  # ---------------------------------------------------------------------------
+  # Unit tests — no Docker, no DB
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Unit tests (no Docker)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.x"
+
+      - name: Install dev dependencies
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Run unit tests
+        run: pytest -m "not integration" -v
+
+  # ---------------------------------------------------------------------------
+  # Integration tests (migrations up→down→up + healthz against real Postgres)
+  # C1-T06: gate that runs on every push/PR; fails if any migration is
+  # irreversible or if the app cannot connect to a real Postgres.
+  # ---------------------------------------------------------------------------
+  integration-tests:
+    name: Integration tests + migrations (up→down→up)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: calorithm
+          POSTGRES_PASSWORD: calorithm
+          POSTGRES_DB: calorithm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Consumed by conftest.test_db_url (override branch) — asyncpg URL.
+      # The service container is ready before steps run (health-check above).
+      TEST_DATABASE_URL: "postgresql+asyncpg://calorithm:calorithm@localhost:5432/calorithm_test"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.x"
+
+      - name: Install dev dependencies
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Run integration tests (includes migration up→down→up gate)
+        # pytest -m integration runs:
+        #   - tests/integration/test_migration_0001.py  (up→down→up gate, §3a p.5)
+        #   - tests/integration/test_health_db.py       (real-Postgres /healthz check)
+        # TEST_DATABASE_URL (set above) is picked up by conftest.test_db_url,
+        # bypassing testcontainers — no Docker-in-Docker needed in CI.
+        run: pytest -m integration -v

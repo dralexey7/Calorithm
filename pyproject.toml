@@ -1,0 +1,116 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["core", "apps"]
+
+[project]
+name = "calorithm"
+version = "0.1.0"
+description = "Smart Telegram calorie counter: free-form text → КБЖУ → track"
+requires-python = ">=3.12"
+dependencies = [
+    # Web framework
+    "fastapi==0.115.5",
+    "uvicorn[standard]==0.32.1",
+    # Validation & config
+    "pydantic==2.10.3",
+    "pydantic-settings==2.6.1",
+    # Database — async ORM + drivers
+    "sqlalchemy==2.0.36",
+    "asyncpg==0.30.0",
+    # Migrations
+    "alembic==1.14.0",
+    # Sync Postgres driver for Alembic — used by the one-shot migrate container
+    # and by integration tests.  psycopg2-binary ships prebuilt wheels so no
+    # C compiler is needed in the runtime image.
+    "psycopg2-binary==2.9.10",
+    # Observability
+    "prometheus-client==0.21.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Test runner
+    "pytest==8.3.4",
+    "pytest-asyncio==0.24.0",
+    "pytest-mock==3.14.0",
+    # Async HTTP client for ASGI tests
+    "httpx==0.27.2",
+    # Real Postgres in tests (testcontainers).
+    # The [postgresql] extra was absorbed into the base package in 4.x;
+    # psycopg2-binary is now a production dependency (needed by migrate container).
+    "testcontainers==4.9.0",
+    # Linter + formatter
+    "ruff==0.8.4",
+    # Type checker — pyright chosen over mypy:
+    #   faster incremental analysis, first-class support for Pydantic v2 and
+    #   FastAPI's dependency injection patterns, strict mode without heavy
+    #   per-plugin configuration.
+    "pyright==1.1.390",
+]
+
+# ---------------------------------------------------------------------------
+# Tool configuration
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "PLC", # pylint convention
+    "PLE", # pylint error
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501",   # line too long — ruff format handles wrapping
+    "RUF001", # ambiguous unicode in identifiers — project uses Russian text
+    "RUF002", # ambiguous unicode in docstrings — Russian docstrings are intentional
+    "RUF003", # ambiguous unicode in comments — Russian comments are intentional
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "apps"]
+
+[tool.ruff.format]
+# black-compatible style
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+# ---------------------------------------------------------------------------
+# Pyright
+# ---------------------------------------------------------------------------
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+# Source roots so pyright resolves `core.*` and `apps.*` without install
+venvPath = "."
+venv = ".venv"
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: marks tests that require a running Postgres/Docker (deselect with '-m not integration')",
+]
+# Fail on unraisable exceptions and thread exceptions to catch async leaks
+filterwarnings = [
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
