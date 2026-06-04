@@ -1,12 +1,14 @@
 """
-Shared fixtures for the C1 test suite.
+Shared fixtures for the test suite (C1 + C2).
 
 Scope summary:
-- `monkeypatch_env`: patches ENV variables in a test without touching the OS environment.
-- `test_db_url`: ephemeral Postgres via testcontainers (session-scoped); honors a
-  TEST_DATABASE_URL override; skips integration tests only if neither the override
-  nor a usable Docker/testcontainers is available. Requires Docker running locally.
-- `async_client`: an ASGI test client for api-core; mocks are passed in by individual tests.
+- `clean_env`: removes all Calorithm ENV variables so config tests start clean.
+- `test_db_url`: ephemeral Postgres via testcontainers (session-scoped); honors
+  TEST_DATABASE_URL override; skips if neither override nor Docker available.
+- `redis_url`: ephemeral Redis via testcontainers (session-scoped); honors
+  TEST_REDIS_URL override; skips integration Redis tests if neither is available.
+  Added in C2 by analogy with test_db_url.
+- `api_client`: ASGI test client for api-core (unit tests override dependencies).
 """
 
 import os
@@ -22,6 +24,15 @@ from httpx import ASGITransport, AsyncClient
 os.environ.setdefault(
     "DATABASE_URL",
     "postgresql+asyncpg://placeholder:placeholder@localhost/placeholder",
+)
+
+# Similarly, set a dummy REDIS_URL so api-core (and processing-worker) can be
+# imported in unit tests without a real Redis. The bus is never connected in
+# unit tests because it is overridden via DI. Config tests use clean_env to
+# remove this and exercise fail-fast on missing REDIS_URL.
+os.environ.setdefault(
+    "REDIS_URL",
+    "redis://placeholder-redis:6379/0",
 )
 
 # ---------------------------------------------------------------------------
@@ -115,6 +126,47 @@ def test_db_url():
             yield url
     except Exception as exc:  # Docker not running / image pull failed, etc.
         pytest.skip(f"Could not start Postgres testcontainer (is Docker running?): {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Integration: real Redis (C2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def redis_url():
+    """
+    Provides a Redis URL for integration tests against a real Redis broker.
+
+    Resolution order (mirrors test_db_url logic for Postgres):
+      1. TEST_REDIS_URL env var — use that URL as-is (CI or manual override).
+      2. Spin up an ephemeral Redis:7-alpine via testcontainers (session-scoped,
+         torn down automatically). Requires a running Docker daemon.
+      3. If neither is available, skip the integration test.
+
+    Integration tests that do NOT need real Redis (e.g. InMemoryBus loop tests)
+    do not use this fixture and always run.
+    """
+    override = os.environ.get("TEST_REDIS_URL")
+    if override:
+        yield override
+        return
+
+    try:
+        from testcontainers.redis import RedisContainer
+    except ImportError:
+        pytest.skip(
+            "testcontainers[redis] not installed and TEST_REDIS_URL not set — "
+            "skipping Redis integration test"
+        )
+
+    try:
+        with RedisContainer("redis:7-alpine") as redis:
+            host = redis.get_container_host_ip()
+            port = redis.get_exposed_port(6379)
+            yield f"redis://{host}:{port}/0"
+    except Exception as exc:  # Docker not running / image pull failed, etc.
+        pytest.skip(f"Could not start Redis testcontainer (is Docker running?): {exc}")
 
 
 # ---------------------------------------------------------------------------

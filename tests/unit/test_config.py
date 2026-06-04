@@ -1,15 +1,21 @@
 """
-Unit tests for core.config.Settings — C1-T02.
+Unit tests for core.config.Settings — C1-T02 + C2 REDIS_URL additions (TДЕ-9).
 
 All tests are pure unit tests: no real DB, no network, no file I/O.
 ENV is controlled via the `clean_env` fixture (see conftest.py).
 
-What is verified and why:
+C1 tests verify:
   - Settings reads DATABASE_URL from ENV (§6 conventions: single source of truth).
   - Missing required variable raises a clear validation error (fail-fast, §6).
   - Secret value does not appear in repr/str (secrets must not leak, §6).
   - Every key in .env.example maps to a Settings field (DoD §5: .env.example
     must be complete and in sync with the model).
+
+C2 additions (TДЕ-9, REDIS_URL):
+  - Settings loads REDIS_URL from ENV.
+  - Missing REDIS_URL raises ValidationError at init (fail-fast — C2 adds Redis
+    as a required dependency, conventions §6).
+  - REDIS_URL does not appear in repr/str (may contain credentials — §6).
 """
 
 import os
@@ -131,3 +137,60 @@ def test_env_example_keys_match_settings_fields(clean_env):
 
     orphaned = [k for k in example_keys if k not in declared_fields]
     assert not orphaned, f".env.example contains keys not declared in Settings: {orphaned}"
+
+
+# ---------------------------------------------------------------------------
+# C2 additions: REDIS_URL (TДЕ-9)
+# ---------------------------------------------------------------------------
+
+
+def test_settings_loads_redis_url_from_env(clean_env):
+    """
+    When REDIS_URL is present in ENV (alongside DATABASE_URL), Settings must
+    expose it as settings.redis_url.
+    REDIS_URL is required since C2 — Redis is a hard dependency for the broker
+    (conventions §6, C2 plan §2 core/config).
+    """
+    clean_env.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    clean_env.setenv("REDIS_URL", "redis://localhost:6379/0")
+
+    from core.config.settings import Settings
+
+    settings = Settings()  # type: ignore[call-arg]
+    assert settings.redis_url == "redis://localhost:6379/0"
+
+
+def test_settings_raises_on_missing_redis_url(clean_env):
+    """
+    When REDIS_URL is absent, constructing Settings must raise a ValidationError.
+    Redis is a required dependency from C2 onward; missing config must fail
+    loudly at startup rather than producing a confusing runtime error
+    (conventions §6 fail-fast, C2-T03).
+    """
+    clean_env.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    # REDIS_URL intentionally not set
+
+    with pytest.raises(Exception) as exc_info:
+        from core.config.settings import Settings
+
+        Settings()  # type: ignore[call-arg]
+
+    error_text = str(exc_info.value).lower()
+    assert "redis_url" in error_text or "validation" in error_text or "field" in error_text
+
+
+def test_settings_redis_url_not_in_repr(clean_env):
+    """
+    The REDIS_URL value must not appear in repr(settings) or str(settings).
+    REDIS_URL can contain credentials (redis://:password@host/db) — it must
+    be masked in all string representations (conventions §6).
+    """
+    clean_env.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    clean_env.setenv("REDIS_URL", "redis://:SUPERSECRET_REDIS@localhost:6379/0")
+
+    from core.config.settings import Settings
+
+    settings = Settings()  # type: ignore[call-arg]
+    representation = repr(settings) + str(settings)
+
+    assert "SUPERSECRET_REDIS" not in representation
